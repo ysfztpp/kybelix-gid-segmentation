@@ -1,43 +1,62 @@
-# train.py
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader
+import torch.optim as optim
+from tqdm import tqdm
 
+from config import Config
+from src.models.model_factory import get_model
+from src.data.dataset import GIDDataset
+from src.utils.losses import FocalTverskyLoss
+from src.utils.metrics import get_iou_score
 
-from src.dataset import GIDSegmentationDataset
-from src.utils import train_one_epoch, validate, visualize_step
+def train():
+    # 1. Veri Hazırlığı
+    train_ds = GIDDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MSK_DIR)
+    val_ds = GIDDataset(Config.VAL_IMG_DIR, Config.VAL_MSK_DIR)
+    
+    train_loader = DataLoader(train_ds, batch_size=Config.BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=Config.BATCH_SIZE, shuffle=False)
 
-# --- AYARLAR ---
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BASE_PATH = '/content/drive/MyDrive/Dataset_Final/' 
-TARGET_COLOR_RGB = [0, 255, 0]
-BATCH_SIZE = 4
-LIMIT = 32 
+    # 2. Model, Loss ve Optimizer
+    model = get_model(Config.MODEL_NAME).to(Config.DEVICE)
+    criterion = FocalTverskyLoss()
+    optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
+    
+    # FP16 (Hızlı eğitim için Mixed Precision)
+    scaler = torch.cuda.amp.GradScaler()
 
-# --- DATA LOADER ---
-train_dataset = GIDSegmentationDataset(base_dir=BASE_PATH, split='train', target_color=TARGET_COLOR_RGB, limit=LIMIT)
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    print(f"🚀 Eğitim Başlıyor: {Config.MODEL_NAME} | Cihaz: {Config.DEVICE}")
 
-val_dataset = GIDSegmentationDataset(base_dir=BASE_PATH, split='val', limit=LIMIT)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    for epoch in range(Config.EPOCHS):
+        model.train()
+        train_loss, train_iou = 0, 0
+        
+        loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{Config.EPOCHS}]")
+        for images, masks in loop:
+            images, masks = images.to(Config.DEVICE), masks.to(Config.DEVICE)
+            
+            # Forward pass with Mixed Precision
+            with torch.cuda.amp.autocast():
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+            
+            # Backward pass
+            optimizer.zero_grad()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
+            # Metrikler
+            train_loss += loss.item()
+            train_iou += get_iou_score(outputs, masks)
+            
+            loop.set_postfix(loss=loss.item(), iou=train_iou / (loop.n + 1))
 
-# --- MODEL ---
-class DummyModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv = nn.Conv2d(3, 1, kernel_size=3, padding=1)
-    def forward(self, x):
-        return self.conv(x)
+        # Epoch sonu kayıt (Checkpoint)
+        if (epoch + 1) % 5 == 0:
+            save_path = f"{Config.CHECKPOINT_DIR}/{Config.MODEL_NAME}_ep{epoch+1}.pth"
+            torch.save(model.state_dict(), save_path)
+            print(f"💾 Model kaydedildi: {save_path}")
 
-model = DummyModel().to(device)
-criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
-
-# --- ÇALIŞTIRMA ---
 if __name__ == "__main__":
-    print(f"Eğitim başlıyor... Cihaz: {device}")
-    loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
-    print(f"İlk epoch tamamlandı. Loss: {loss:.4f}")
-    # Not: Görselleştirme terminalde hata verebilir ama Colab'da çalışır
-    # visualize_step(model, val_loader, device)
+    train()
