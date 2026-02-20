@@ -41,8 +41,16 @@ def train(
     max_val_batches=None,
 ):
     # 1. Veri Hazırlığı
-    train_ds = GIDDataset(Config.TRAIN_IMG_DIR, Config.TRAIN_MSK_DIR)
-    val_ds = GIDDataset(Config.VAL_IMG_DIR, Config.VAL_MSK_DIR)
+    train_ds = GIDDataset(
+        Config.TRAIN_IMG_DIR,
+        Config.TRAIN_MSK_DIR,
+        target_color=Config.TARGET_COLOR,
+    )
+    val_ds = GIDDataset(
+        Config.VAL_IMG_DIR,
+        Config.VAL_MSK_DIR,
+        target_color=Config.TARGET_COLOR,
+    )
 
     train_loader = DataLoader(train_ds, batch_size=Config.BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=Config.BATCH_SIZE, shuffle=False)

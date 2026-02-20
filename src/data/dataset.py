@@ -9,11 +9,15 @@ class GIDDataset(Dataset):
     GID Dataset için özelleştirilmiş, modüler ve güvenli veri yükleyici.
     Cavit'in imdecode mantığı ile güçlendirilmiştir.
     """
-    def __init__(self, images_dir, masks_dir, transform=None, limit=None):
+    def __init__(self, images_dir, masks_dir, transform=None, limit=None, target_color=None):
         self.images_dir = images_dir
         self.masks_dir = masks_dir
         self.transform = transform
+        self.target_color = np.array(target_color if target_color is not None else [0, 255, 0])
         
+        if not os.path.isdir(images_dir) or not os.path.isdir(masks_dir):
+            raise FileNotFoundError(f"Dataset paths not found: '{images_dir}' or '{masks_dir}'")
+
         # Dosya isimlerini eşleştir (Uzantıları dikkate almadan ID bazlı)
         img_files = {os.path.splitext(f)[0]: f for f in os.listdir(images_dir) if not f.startswith('.')}
         msk_files = {os.path.splitext(f)[0]: f for f in os.listdir(masks_dir) if not f.startswith('.')}
@@ -38,13 +42,13 @@ class GIDDataset(Dataset):
         image = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        # 2. Maskeyi Oku ve Yeşil Alanı Ayıkla ([0, 255, 0])
+        # 2. Maskeyi Oku ve hedef rengi ayıkla
         msk_bytes = np.fromfile(msk_path, np.uint8)
         mask_raw = cv2.imdecode(msk_bytes, cv2.IMREAD_COLOR)
         mask_raw = cv2.cvtColor(mask_raw, cv2.COLOR_BGR2RGB)
-        
-        # Sadece yeşil kanalları 1, diğerlerini 0 yap
-        mask = np.all(mask_raw == [0, 255, 0], axis=-1).astype(np.float32)
+
+        # Sadece hedef rengi 1, diğerlerini 0 yap
+        mask = np.all(mask_raw == self.target_color, axis=-1).astype(np.float32)
 
         # 3. Augmentation (Albumentations kütüphanesi için hazır yapı)
         if self.transform:
@@ -57,3 +61,20 @@ class GIDDataset(Dataset):
             mask = torch.from_numpy(mask).unsqueeze(0).float()
 
         return image, mask
+
+
+class GIDSegmentationDataset(GIDDataset):
+    """
+    Geriye dönük uyumluluk için base_dir + split alanını destekler.
+    """
+
+    def __init__(self, base_dir, split="train", target_color=None, transform=None, limit=None):
+        images_dir = os.path.join(base_dir, "Normal", split)
+        masks_dir = os.path.join(base_dir, "Mask", split)
+        super().__init__(
+            images_dir=images_dir,
+            masks_dir=masks_dir,
+            transform=transform,
+            limit=limit,
+            target_color=target_color,
+        )

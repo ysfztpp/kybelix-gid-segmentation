@@ -1,0 +1,57 @@
+Kybelix-Agri-AI: How It Connects And Works
+
+Overview
+- Entry point: train.py
+- Configuration: config.py
+- Data loading: src/data/dataset.py
+- Models: src/models/*
+- Loss + metrics: src/utils/losses.py, src/utils/metrics.py
+
+Data Flow
+1) Config sets device, dataset paths, model choice, training hyperparameters.
+2) train.py builds datasets using GIDDataset with image and mask directories from Config.
+3) DataLoader yields batches of images and binary masks.
+4) Model is created by src/models/model_factory.get_model.
+5) Forward pass produces logits for segmentation.
+6) Loss computed by FocalTverskyLoss; IoU metric computed by get_iou_score.
+7) Optimizer updates model; checkpoints saved under Config.CHECKPOINT_DIR.
+
+Dataset Handling
+- src/data/dataset.py contains the single dataset implementation.
+- GIDDataset loads images/masks by matching base filenames (ignores extensions),
+  reads with OpenCV imdecode for Unicode path safety, then converts to RGB.
+- Mask is created by selecting pixels that match Config.TARGET_COLOR (default [0,255,0]).
+- If transform is provided, it is applied to both image and mask; otherwise tensors
+  are created directly.
+- GIDSegmentationDataset is a compatibility wrapper that accepts a base_dir + split
+  and forwards to GIDDataset.
+
+Models
+- get_model in src/models/model_factory.py selects a model by name:
+  b0, b4, ghostnet.
+- Model classes live in src/models/unet.py, unetpp.py, and deeplab.py.
+
+Training Loop (train.py)
+- Mixed precision is enabled automatically on CUDA.
+- Each epoch trains, then validates.
+- Checkpoints are saved atomically to avoid corruption:
+  * {model}_last.pth
+  * {model}_epoch###.pth
+  * {model}_best.pth
+
+Notes
+- There is a single dataset module now: src/data/dataset.py.
+- If any code previously imported src/dataset.py, use src.data.dataset instead.
+
+How To Use
+1) Install dependencies.
+   pip install -r requirements.txt
+2) Place the dataset under ./Dataset_Final (or update Config.SHORTCUT_NAME/paths).
+   Expected structure:
+   ./Dataset_Final/Normal/train
+   ./Dataset_Final/Normal/val
+   ./Dataset_Final/Mask/train
+   ./Dataset_Final/Mask/val
+3) Train:
+   python3 train.py
+4) Checkpoints are saved to ./checkpoints.
