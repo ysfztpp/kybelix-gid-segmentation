@@ -48,10 +48,10 @@ How To Use
    pip install -r requirements.txt
 2) Place the dataset under ./Dataset_Final (or update Config.SHORTCUT_NAME/paths).
    Expected structure:
-   ./Dataset_Final/Normal/train
-   ./Dataset_Final/Normal/val
-   ./Dataset_Final/Mask/train
-   ./Dataset_Final/Mask/val
+   ./Dataset_Final/unmasked/train
+   ./Dataset_Final/unmasked/val
+   ./Dataset_Final/masked/train
+   ./Dataset_Final/masked/val
 3) Train:
    python3 train.py
 4) Checkpoints are saved to ./checkpoints.
