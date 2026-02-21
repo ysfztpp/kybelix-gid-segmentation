@@ -42,6 +42,12 @@ class Config:
     CHECKPOINT_DIR = "checkpoints"
     RESULT_DIR = "results"
 
+    # --- Resume Ayarları ---
+    # Örnek: "checkpoints/<run_name>/b4_last.pth"
+    RESUME_PATH = None
+    # True ise optimizer state yüklenmez
+    RESET_OPTIMIZER = False
+
 
 # Klasörlerin varlığından emin olalım
 os.makedirs(Config.CHECKPOINT_DIR, exist_ok=True)

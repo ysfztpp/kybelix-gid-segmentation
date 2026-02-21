@@ -2,3 +2,5 @@ torch
 numpy
 matplotlib
 Pillow
+opencv-python
+tqdm

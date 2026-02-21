@@ -63,22 +63,23 @@ def _resolve_resume_path(resume: str | None, model_name: str | None) -> Path | N
     raise FileNotFoundError(f"Resume path not found: {resume_path}")
 
 
-def _resolve_resume_epoch(resume_dir: Path, resume_epoch: int, model_name: str | None) -> Path:
-    if resume_epoch <= 0:
-        raise ValueError("--resume-epoch must be >= 1")
-    pattern = (
-        f"{model_name}_epoch{resume_epoch:03d}.pth"
-        if model_name
-        else f"*_epoch{resume_epoch:03d}.pth"
-    )
-    candidates = sorted(resume_dir.glob(pattern))
-    if not candidates:
-        raise FileNotFoundError(f"No checkpoint files matching '{pattern}' in {resume_dir}")
-    return candidates[-1]
-
-
 def _load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict:
-    return torch.load(checkpoint_path, map_location=device)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+
+    if checkpoint_path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
+        raise ValueError(
+            "Resume path must be a PyTorch checkpoint file (.pth/.pt/.ckpt). "
+            f"Got: {checkpoint_path}"
+        )
+
+    try:
+        return torch.load(checkpoint_path, map_location=device)
+    except Exception as exc:
+        raise ValueError(
+            "Failed to load checkpoint. Ensure the path points to a valid PyTorch "
+            "checkpoint file (not an image, zip, or text file)."
+        ) from exc
 
 
 def _plot_metrics(history: list[dict], out_path: Path):
@@ -141,7 +142,6 @@ def train(
     max_train_batches=None,
     max_val_batches=None,
     resume=None,
-    resume_epoch=None,
     learning_rate=None,
     reset_optimizer=False,
 ):
@@ -178,12 +178,10 @@ def train(
     learning_rate = learning_rate or Config.LEARNING_RATE
     pretrained = Config.PRETRAINED if pretrained is None else pretrained
 
+    resume = Config.RESUME_PATH if resume is None else resume
+    reset_optimizer = reset_optimizer or Config.RESET_OPTIMIZER
+
     resume_path = _resolve_resume_path(resume, model_name)
-    if resume_path is not None and resume_epoch is not None:
-        if resume_path.is_dir():
-            resume_path = _resolve_resume_epoch(resume_path, resume_epoch, model_name)
-        else:
-            raise ValueError("--resume-epoch can only be used when --resume points to a run directory.")
     checkpoint = None
     if resume_path is not None:
         checkpoint = _load_checkpoint(resume_path, Config.DEVICE)
@@ -344,12 +342,6 @@ if __name__ == "__main__":
         help="Path to checkpoint file or run directory to resume.",
     )
     parser.add_argument(
-        "--resume-epoch",
-        type=int,
-        default=None,
-        help="When --resume is a run directory, load a specific epoch checkpoint.",
-    )
-    parser.add_argument(
         "--reset-optimizer",
         action="store_true",
         help="Do not load optimizer state from checkpoint (useful when changing LR).",
@@ -363,7 +355,6 @@ if __name__ == "__main__":
         max_train_batches=args.max_train_batches,
         max_val_batches=args.max_val_batches,
         resume=args.resume,
-        resume_epoch=args.resume_epoch,
         learning_rate=args.learning_rate,
         reset_optimizer=args.reset_optimizer,
     )
