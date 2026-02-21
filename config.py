@@ -23,7 +23,7 @@ class Config:
     TARGET_COLOR = [0, 255, 0]  # GID Dataset yeşil alanlar
 
     # --- Yol Ayarları (Colab & Local Uyumu) ---
-    SHORTCUT_NAME = "Dataset_Final"
+    SHORTCUT_NAME = "phase1data"
 
     if os.path.exists("/content/drive"):
         BASE_PATH = f"/content/drive/MyDrive/{SHORTCUT_NAME}"
@@ -31,10 +31,10 @@ class Config:
         BASE_PATH = f"./{SHORTCUT_NAME}"  # Lokal test için
 
     # Alt klasör yolları
-    TRAIN_IMG_DIR = os.path.join(BASE_PATH, "Normal", "train")
-    TRAIN_MSK_DIR = os.path.join(BASE_PATH, "Mask", "train")
-    VAL_IMG_DIR = os.path.join(BASE_PATH, "Normal", "val")
-    VAL_MSK_DIR = os.path.join(BASE_PATH, "Mask", "val")
+    TRAIN_IMG_DIR = os.path.join(BASE_PATH, "unmasked", "train")
+    TRAIN_MSK_DIR = os.path.join(BASE_PATH, "masked", "train")
+    VAL_IMG_DIR = os.path.join(BASE_PATH, "unmasked", "val")
+    VAL_MSK_DIR = os.path.join(BASE_PATH, "masked", "val")
 
     # --- Kayıt ve Sonuçlar ---
     CHECKPOINT_DIR = "checkpoints"
