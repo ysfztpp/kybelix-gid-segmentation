@@ -46,12 +46,42 @@ Notes
 How To Use
 1) Install dependencies.
    pip install -r requirements.txt
-2) Place the dataset under ./Dataset_Final (or update Config.SHORTCUT_NAME/paths).
+   Also required at runtime:
+   pip install opencv-python tqdm
+2) Place the dataset under ./phase1data (or update Config.SHORTCUT_NAME/paths).
    Expected structure:
-   ./Dataset_Final/unmasked/train
-   ./Dataset_Final/unmasked/val
-   ./Dataset_Final/masked/train
-   ./Dataset_Final/masked/val
-3) Train:
+   ./phase1data/unmasked/train
+   ./phase1data/unmasked/val
+   ./phase1data/unmasked/test
+   ./phase1data/masked/train
+   ./phase1data/masked/val
+3) If you are using Google Drive in Colab, the code will automatically resolve:
+   /content/drive/MyDrive/phase1data
+   Otherwise it uses the local relative path ./phase1data.
+4) IMPORTANT: The current dataset loader expects images and masks to be files
+   directly inside the train/val/test folders. If your data is organized into
+   additional subfolders, the loader must be updated to recurse.
+5) Dataset requirements:
+   - Image and mask filenames must match by base name (ignores extensions).
+   - Masks should be RGB images with the target color defined in Config.TARGET_COLOR.
+   - Default target color is [0, 255, 0] (green).
+6) Configure training in config.py:
+   - MODEL_NAME: b0, b4, ghostnet
+   - BATCH_SIZE, EPOCHS, LEARNING_RATE, IMAGE_SIZE
+   - TARGET_COLOR for mask extraction
+7) Train:
    python3 train.py
-4) Checkpoints are saved to ./checkpoints.
+8) Checkpoints are saved to ./checkpoints.
+
+Training And Resuming
+- Full training (default config):
+  python3 train.py
+- Custom training from code (example; edit train.py or import train in a script):
+  python3 -c "from train import train; train(model_name='b4', epochs=5)"
+- Current status on resume support:
+  The training script does NOT yet support resuming from a checkpoint.
+  It always starts a new run and does not load model/optimizer states.
+- If you want resume support, it can be added to train.py to:
+  1) load model_state_dict and optimizer_state_dict,
+  2) restore epoch counters and metrics,
+  3) continue saving into the same run directory.
