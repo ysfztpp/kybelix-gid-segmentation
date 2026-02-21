@@ -18,6 +18,8 @@ class Config:
     EPOCHS = 30
     LEARNING_RATE = 1e-4
     IMAGE_SIZE = 512  # Giriş görüntü boyutu
+    NUM_WORKERS = 4
+    PIN_MEMORY = True
 
     # --- Veri Seti Ayarları ---
     TARGET_COLOR = [0, 255, 0]  # GID Dataset yeşil alanlar
