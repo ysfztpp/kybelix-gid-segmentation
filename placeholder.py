@@ -1,0 +1,1 @@
+print('sadece test için')
