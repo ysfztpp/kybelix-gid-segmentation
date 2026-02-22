@@ -57,6 +57,8 @@ class GIDDataset(Dataset):
             mask = augmented["mask"]
             if not torch.is_tensor(image):
                 image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+            elif image.dtype == torch.uint8:
+                image = image.float() / 255.0
             if not torch.is_tensor(mask):
                 mask = torch.from_numpy(mask).unsqueeze(0).float()
             elif mask.dim() == 2:
