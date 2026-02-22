@@ -23,6 +23,8 @@ class Config:
 
     # --- Veri Seti Ayarları ---
     TARGET_COLOR = [0, 255, 0]  # GID Dataset yeşil alanlar
+    USE_AUGMENTATION = True
+    AUGMENTATION_PRESET = "strong"  # "none", "light", "strong"
 
     # --- Yol Ayarları (Colab & Local Uyumu) ---
     SHORTCUT_NAME = "phase1data"

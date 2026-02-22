@@ -4,3 +4,4 @@ matplotlib
 Pillow
 opencv-python
 tqdm
+albumentations

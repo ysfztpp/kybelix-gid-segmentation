@@ -33,6 +33,11 @@ How To Train
 3) Run:
    python3 train.py
 
+Augmentations
+- Controlled from config.py:
+  USE_AUGMENTATION = True/False
+  AUGMENTATION_PRESET = "none" | "light" | "strong"
+
 Where Runs Are Saved
 - If Google Drive is mounted and SAVE_RUNS_TO_DRIVE=True:
   /content/drive/MyDrive/kybelix_runs/checkpoints

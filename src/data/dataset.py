@@ -53,8 +53,14 @@ class GIDDataset(Dataset):
         # 3. Augmentation (Albumentations kütüphanesi için hazır yapı)
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
-            image = augmented['image']
-            mask = augmented['mask']
+            image = augmented["image"]
+            mask = augmented["mask"]
+            if not torch.is_tensor(image):
+                image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+            if not torch.is_tensor(mask):
+                mask = torch.from_numpy(mask).unsqueeze(0).float()
+            elif mask.dim() == 2:
+                mask = mask.unsqueeze(0).float()
         else:
             # Manuel Tensor dönüşümü (Eğer transform yoksa)
             image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0

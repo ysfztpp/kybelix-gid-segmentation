@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from config import Config
 from src.data.dataset import GIDDataset
+from src.utils.augmentations import build_augmentations
 from src.models.model_factory import get_model
 from src.utils.losses import FocalTverskyLoss
 from src.utils.metrics import get_iou_score
@@ -147,15 +148,20 @@ def train(
 ):
     # 1. Veri Hazırlığı
     _configure_torch()
+    train_transform = build_augmentations(Config) if Config.USE_AUGMENTATION else None
+    val_transform = build_augmentations(Config, is_train=False) if Config.USE_AUGMENTATION else None
+
     train_ds = GIDDataset(
         Config.TRAIN_IMG_DIR,
         Config.TRAIN_MSK_DIR,
         target_color=Config.TARGET_COLOR,
+        transform=train_transform,
     )
     val_ds = GIDDataset(
         Config.VAL_IMG_DIR,
         Config.VAL_MSK_DIR,
         target_color=Config.TARGET_COLOR,
+        transform=val_transform,
     )
 
     train_loader = DataLoader(
