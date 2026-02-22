@@ -197,13 +197,36 @@ def train(
     model = get_model(model_name, n_classes=Config.NUM_CLASSES, pretrained=pretrained).to(Config.DEVICE)
     criterion = FocalTverskyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    scheduler = None
+    if Config.SCHEDULER == "plateau":
+        monitor = Config.EARLY_STOPPING_MONITOR
+        mode = "max" if monitor == "val_iou" else "min"
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode=mode,
+            factor=Config.SCHEDULER_FACTOR,
+            patience=Config.SCHEDULER_PATIENCE,
+            min_lr=Config.SCHEDULER_MIN_LR,
+        )
 
     run_name = checkpoint.get("run_name") if checkpoint else _build_run_name(model_name)
     run_dir = Path(Config.CHECKPOINT_DIR) / run_name
+    local_run_dir = Path(Config.LOCAL_CHECKPOINT_DIR) / run_name
+    if not Config.SAVE_RUNS_TO_DRIVE:
+        local_run_dir = run_dir
     result_dir = Path(Config.RESULT_DIR) / run_name
     best_val_iou = checkpoint.get("best_val_iou", -1.0) if checkpoint else -1.0
     history = checkpoint.get("history", []) if checkpoint else []
     start_epoch = checkpoint.get("epoch", 0) if checkpoint else 0
+    early_state = checkpoint.get("early_stopping") if checkpoint else None
+    early_monitor = Config.EARLY_STOPPING_MONITOR
+    early_mode = "max" if early_monitor == "val_iou" else "min"
+    if early_state:
+        early_best = early_state.get("best")
+        early_bad_epochs = early_state.get("bad_epochs", 0)
+    else:
+        early_best = -float("inf") if early_mode == "max" else float("inf")
+        early_bad_epochs = 0
 
     # FP16 (Hızlı eğitim için Mixed Precision)
     scaler = torch.cuda.amp.GradScaler(enabled=Config.DEVICE.type == "cuda")
@@ -212,6 +235,8 @@ def train(
         model.load_state_dict(checkpoint["model_state_dict"])
         if not reset_optimizer:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if scheduler and "scheduler_state_dict" in checkpoint and checkpoint["scheduler_state_dict"]:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         for group in optimizer.param_groups:
             group["lr"] = learning_rate
         if "scaler_state_dict" in checkpoint and checkpoint["scaler_state_dict"]:
@@ -285,6 +310,25 @@ def train(
         if is_best:
             best_val_iou = epoch_metrics["val_iou"]
 
+        if scheduler:
+            if early_monitor == "val_iou":
+                scheduler.step(epoch_metrics["val_iou"])
+            else:
+                scheduler.step(epoch_metrics["val_loss"])
+
+        if Config.EARLY_STOPPING:
+            current = epoch_metrics[early_monitor]
+            improved = (
+                current >= early_best + Config.EARLY_STOPPING_MIN_DELTA
+                if early_mode == "max"
+                else current <= early_best - Config.EARLY_STOPPING_MIN_DELTA
+            )
+            if improved:
+                early_best = current
+                early_bad_epochs = 0
+            else:
+                early_bad_epochs += 1
+
         checkpoint = {
             "epoch": epoch + 1,
             "model_name": model_name,
@@ -292,9 +336,16 @@ def train(
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scaler_state_dict": scaler.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
             "metrics": epoch_metrics,
             "history": history,
             "best_val_iou": best_val_iou,
+            "early_stopping": {
+                "monitor": early_monitor,
+                "mode": early_mode,
+                "best": early_best,
+                "bad_epochs": early_bad_epochs,
+            },
             "config": {
                 "learning_rate": learning_rate,
                 "batch_size": Config.BATCH_SIZE,
@@ -304,13 +355,16 @@ def train(
             },
         }
 
-        # Always save last checkpoint for safe resume.
+        # Always save last checkpoint for safe resume (Drive if enabled).
         _safe_save_checkpoint(checkpoint, run_dir / f"{model_name}_last.pth")
 
-        # Save per-epoch checkpoint.
-        _safe_save_checkpoint(checkpoint, run_dir / f"{model_name}_epoch{epoch + 1:03d}.pth")
+        # Save per-epoch checkpoint locally.
+        if Config.SAVE_EPOCHS_LOCALLY:
+            _safe_save_checkpoint(
+                checkpoint, local_run_dir / f"{model_name}_epoch{epoch + 1:03d}.pth"
+            )
 
-        # Save best validation IoU checkpoint.
+        # Save best validation IoU checkpoint (Drive if enabled).
         if is_best:
             best_ckpt = run_dir / f"{model_name}_best.pth"
             _safe_save_checkpoint(checkpoint, best_ckpt)
@@ -321,6 +375,13 @@ def train(
             f"train_loss={epoch_metrics['train_loss']:.4f}, train_iou={epoch_metrics['train_iou']:.4f}, "
             f"val_loss={epoch_metrics['val_loss']:.4f}, val_iou={epoch_metrics['val_iou']:.4f}"
         )
+
+        if Config.EARLY_STOPPING and early_bad_epochs >= Config.EARLY_STOPPING_PATIENCE:
+            print(
+                f"🛑 Early stopping: no improvement in {early_monitor} for "
+                f"{Config.EARLY_STOPPING_PATIENCE} epochs."
+            )
+            break
 
     return run_name
 

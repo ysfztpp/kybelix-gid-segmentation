@@ -13,12 +13,12 @@ class Config:
     NUM_CLASSES = 1
     PRETRAINED = True
 
-    # --- Hiperparametreler ---
-    BATCH_SIZE = 4
+    # --- Hiperparametreler (T4 için optimize edildi) ---
+    BATCH_SIZE = 8
     EPOCHS = 30
     LEARNING_RATE = 1e-4
     IMAGE_SIZE = 512  # Giriş görüntü boyutu
-    NUM_WORKERS = 4
+    NUM_WORKERS = 2
     PIN_MEMORY = True
 
     # --- Veri Seti Ayarları ---
@@ -39,14 +39,37 @@ class Config:
     VAL_MSK_DIR = os.path.join(BASE_PATH, "masked", "val")
 
     # --- Kayıt ve Sonuçlar ---
-    CHECKPOINT_DIR = "checkpoints"
-    RESULT_DIR = "results"
+    SAVE_RUNS_TO_DRIVE = True
+    RUNS_DIR_NAME = "kybelix_runs"
+    SAVE_EPOCHS_LOCALLY = True
+    LOCAL_RUNS_ROOT = "."
+
+    if SAVE_RUNS_TO_DRIVE and os.path.exists("/content/drive"):
+        RUNS_ROOT = f"/content/drive/MyDrive/{RUNS_DIR_NAME}"
+    else:
+        RUNS_ROOT = "."
+
+    CHECKPOINT_DIR = os.path.join(RUNS_ROOT, "checkpoints")
+    RESULT_DIR = os.path.join(RUNS_ROOT, "results")
+    LOCAL_CHECKPOINT_DIR = os.path.join(LOCAL_RUNS_ROOT, "checkpoints")
 
     # --- Resume Ayarları ---
     # Örnek: "checkpoints/<run_name>/b4_last.pth"
     RESUME_PATH = None
     # True ise optimizer state yüklenmez
     RESET_OPTIMIZER = False
+
+    # --- Early Stopping ---
+    EARLY_STOPPING = True
+    EARLY_STOPPING_PATIENCE = 5
+    EARLY_STOPPING_MIN_DELTA = 1e-4
+    EARLY_STOPPING_MONITOR = "val_iou"  # "val_iou" veya "val_loss"
+
+    # --- LR Scheduler ---
+    SCHEDULER = "plateau"  # None veya "plateau"
+    SCHEDULER_PATIENCE = 2
+    SCHEDULER_FACTOR = 0.5
+    SCHEDULER_MIN_LR = 1e-6
 
 
 # Klasörlerin varlığından emin olalım
