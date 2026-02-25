@@ -1,1 +1,0 @@
-print('sadece test için')
