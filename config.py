@@ -18,7 +18,7 @@ class Config:
     EPOCHS = 30
     LEARNING_RATE = 1e-4
     IMAGE_SIZE = 512  
-    NUM_WORKERS = 4         # CPU'da paralel veri hazırlama
+    NUM_WORKERS = 2         # CPU'da paralel veri hazırlama
     PIN_MEMORY = True       # GPU'ya veri transferini hızlandırır
 
     # --- Kademeli Eğitim (Freezing) ---
@@ -56,7 +56,7 @@ class Config:
     CHECKPOINT_DIR = os.path.join(RUNS_ROOT, "checkpoints")
     RESULT_DIR = os.path.join(RUNS_ROOT, "results")
     LOCAL_CHECKPOINT_DIR = os.path.join(LOCAL_RUNS_ROOT, "checkpoints")
-
+    RESUME_PATH = None
     # --- Early Stopping & Scheduler ---
     EARLY_STOPPING = True
     EARLY_STOPPING_PATIENCE = 5
