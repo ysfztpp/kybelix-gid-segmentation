@@ -1,6 +1,7 @@
 import argparse
 import csv
 import os
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -143,6 +144,8 @@ def train(
     batch_size=None,
     num_workers=None,
     grad_accum_steps=None,
+    progress_bar=None,
+    log_interval=None,
     max_train_batches=None,
     max_val_batches=None,
     resume=None,
@@ -171,6 +174,10 @@ def train(
     num_workers = Config.NUM_WORKERS if num_workers is None else num_workers
     grad_accum_steps = grad_accum_steps or Config.GRAD_ACCUM_STEPS
     grad_accum_steps = max(int(grad_accum_steps), 1)
+    progress_bar = Config.PROGRESS_BAR if progress_bar is None else bool(progress_bar)
+    log_interval = Config.LOG_INTERVAL if log_interval is None else int(log_interval)
+    log_interval = max(log_interval, 1)
+    use_tqdm = progress_bar and sys.stdout.isatty()
 
     train_loader = DataLoader(
         train_ds,
@@ -275,7 +282,10 @@ def train(
         train_loss, train_iou, train_steps = 0.0, 0.0, 0
         optimizer.zero_grad(set_to_none=True)
 
-        loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{epochs}] (train)")
+        if use_tqdm:
+            loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{epochs}] (train)")
+        else:
+            loop = train_loader
         for step, (images, masks) in enumerate(loop, start=1):
             images, masks = images.to(Config.DEVICE), masks.to(Config.DEVICE)
 
@@ -299,7 +309,14 @@ def train(
             train_iou += get_iou_score(outputs, masks)
             train_steps += 1
 
-            loop.set_postfix(loss=loss.item(), iou=train_iou / max(train_steps, 1))
+            if use_tqdm:
+                loop.set_postfix(loss=loss.item(), iou=train_iou / max(train_steps, 1))
+            elif step % log_interval == 0 or step == 1 or is_last_batch:
+                print(
+                    f"Epoch [{epoch+1}/{epochs}] (train) "
+                    f"step {step}/{len(train_loader)} "
+                    f"loss={loss.item():.4f}, iou={train_iou / max(train_steps, 1):.4f}"
+                )
 
             if max_train_batches and step >= max_train_batches:
                 break
@@ -307,7 +324,10 @@ def train(
         model.eval()
         val_loss, val_iou, val_steps = 0.0, 0.0, 0
         with torch.no_grad():
-            vloop = tqdm(val_loader, desc=f"Epoch [{epoch+1}/{epochs}] (val)")
+            if use_tqdm:
+                vloop = tqdm(val_loader, desc=f"Epoch [{epoch+1}/{epochs}] (val)")
+            else:
+                vloop = val_loader
             for step, (images, masks) in enumerate(vloop, start=1):
                 images, masks = images.to(Config.DEVICE), masks.to(Config.DEVICE)
                 with torch.amp.autocast("cuda", enabled=Config.DEVICE.type == "cuda"):
@@ -316,7 +336,15 @@ def train(
                 val_loss += loss.item()
                 val_iou += get_iou_score(outputs, masks)
                 val_steps += 1
-                vloop.set_postfix(loss=loss.item(), iou=val_iou / max(val_steps, 1))
+                is_last_val_batch = (step == len(val_loader)) or (max_val_batches and step >= max_val_batches)
+                if use_tqdm:
+                    vloop.set_postfix(loss=loss.item(), iou=val_iou / max(val_steps, 1))
+                elif step % log_interval == 0 or step == 1 or is_last_val_batch:
+                    print(
+                        f"Epoch [{epoch+1}/{epochs}] (val) "
+                        f"step {step}/{len(val_loader)} "
+                        f"loss={loss.item():.4f}, iou={val_iou / max(val_steps, 1):.4f}"
+                    )
 
                 if max_val_batches and step >= max_val_batches:
                     break
@@ -380,6 +408,8 @@ def train(
                 "grad_accum_steps": grad_accum_steps,
                 "effective_batch_size": effective_batch,
                 "num_workers": num_workers,
+                "progress_bar": progress_bar,
+                "log_interval": log_interval,
                 "image_size": Config.IMAGE_SIZE,
                 "pretrained": pretrained,
                 "num_classes": Config.NUM_CLASSES,
@@ -428,6 +458,10 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--grad-accum-steps", type=int, default=None)
+    parser.add_argument("--progress-bar", action="store_true")
+    parser.add_argument("--no-progress-bar", dest="progress_bar", action="store_false")
+    parser.set_defaults(progress_bar=None)
+    parser.add_argument("--log-interval", type=int, default=None)
     parser.add_argument("--pretrained", action="store_true")
     parser.add_argument("--no-pretrained", dest="pretrained", action="store_false")
     parser.set_defaults(pretrained=None)
@@ -453,6 +487,8 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         grad_accum_steps=args.grad_accum_steps,
+        progress_bar=args.progress_bar,
+        log_interval=args.log_interval,
         max_train_batches=args.max_train_batches,
         max_val_batches=args.max_val_batches,
         resume=args.resume,

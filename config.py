@@ -27,6 +27,8 @@ class Config:
     IMAGE_SIZE = 512  # Giriş görüntü boyutu
     NUM_WORKERS = 2
     PIN_MEMORY = True
+    PROGRESS_BAR = False  # Colab !python çıktısında satır spam'ini engeller
+    LOG_INTERVAL = 100  # progress bar kapalıyken kaç adımda bir log basılsın
 
     # --- Veri Seti Ayarları ---
     TARGET_COLOR = [0, 255, 0]  # GID Dataset yeşil alanlar
