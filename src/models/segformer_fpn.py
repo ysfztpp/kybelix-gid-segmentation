@@ -62,8 +62,9 @@ class SegFormerB4FPNBoundary(nn.Module):
 
     def __init__(self, n_classes=1, pretrained=True, fpn_channels=128):
         super().__init__()
+        encoder_name = self._resolve_encoder_name()
         self.encoder = timm.create_model(
-            "mit_b4",
+            encoder_name,
             pretrained=pretrained,
             features_only=True,
             out_indices=(0, 1, 2, 3),
@@ -82,6 +83,29 @@ class SegFormerB4FPNBoundary(nn.Module):
         self.edge_head = nn.Sequential(
             ConvBNReLU(fpn_channels, head_channels, kernel_size=3),
             nn.Conv2d(head_channels, 1, kernel_size=1),
+        )
+
+    @staticmethod
+    def _resolve_encoder_name():
+        """Resolve MiT-B4 naming differences across timm versions."""
+        available = set(timm.list_models())
+        preferred = ("mit_b4", "mit_b4.in1k", "mit_b4.in22k_ft_in1k")
+        for name in preferred:
+            if name in available:
+                return name
+
+        wildcard_patterns = ("*mit_b4*", "*segformer*")
+        for pattern in wildcard_patterns:
+            matches = sorted(timm.list_models(pattern))
+            b4_matches = [m for m in matches if "b4" in m]
+            if b4_matches:
+                return b4_matches[0]
+
+        raise RuntimeError(
+            "No MiT-B4 encoder found in installed timm. "
+            "Try: pip install -U 'timm==0.9.16' and restart runtime. "
+            "To inspect available names: python -c \"import timm; print(timm.__version__); "
+            "print([m for m in timm.list_models('*mit*') if 'b4' in m])\""
         )
 
     def forward(self, x, return_aux=False):
