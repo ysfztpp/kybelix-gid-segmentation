@@ -5,3 +5,4 @@ Pillow
 opencv-python
 tqdm
 albumentations
+timm

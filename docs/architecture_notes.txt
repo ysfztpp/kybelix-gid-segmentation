@@ -4,7 +4,7 @@ Overview
 - Entry point: train.py
 - Configuration: config.py
 - Dataset: src/data/dataset.py
-- Models: src/models/unet.py (b0, b4, ghostnet)
+- Models: src/models/unet.py + src/models/segformer_fpn.py (b0, b4, ghostnet, segformer_b4)
 - Loss + metrics: src/utils/losses.py, src/utils/metrics.py
 
 Data Flow
@@ -69,3 +69,9 @@ Models
 - b0: EfficientNet-B0 encoder + attention UNet decoder (lighter, faster).
 - b4: EfficientNet-B4 encoder + attention UNet decoder (heavier, higher accuracy).
 - ghostnet: lightweight backbone for speed and memory efficiency.
+- segformer_b4: MiT-B4 (SegFormer encoder) + FPN-style multi-scale fusion + auxiliary boundary head.
+
+Loss (current default)
+- Dice(seg) + CrossEntropy(seg) + lambda * BCE(edge)
+- edge target: Sobel (or morph gradient, configurable in config.py)
+- boundary head is used as training regularizer; inference uses segmentation output.

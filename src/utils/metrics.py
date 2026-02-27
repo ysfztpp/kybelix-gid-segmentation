@@ -1,11 +1,14 @@
 import torch
 
+from .model_outputs import get_segmentation_logits
+
 def get_iou_score(outputs, labels, threshold=0.5):
     """
     Cavit'in skor dosyalarındaki IoU mantığının PyTorch tensör versiyonu.
     Hem batch bazlı hem de tekli görüntülerde çalışır.
     """
     with torch.no_grad():
+        outputs = get_segmentation_logits(outputs)
         # 1. Logitleri olasılığa çevir (Sigmoid) ve binary (0-1) maske yap
         preds = (torch.sigmoid(outputs) > threshold).float()
         labels = labels.float()
@@ -30,6 +33,7 @@ def get_dice_score(outputs, labels, threshold=0.5):
     Lider sorarsa 'Bunu da ekledim' dersin, puan kazandırır.
     """
     with torch.no_grad():
+        outputs = get_segmentation_logits(outputs)
         preds = (torch.sigmoid(outputs) > threshold).float()
         labels = labels.float()
         if preds.shape != labels.shape:

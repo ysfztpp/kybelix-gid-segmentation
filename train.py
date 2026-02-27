@@ -15,7 +15,7 @@ from config import Config
 from src.data.dataset import GIDDataset
 from src.utils.augmentations import build_augmentations
 from src.models.model_factory import get_model
-from src.utils.losses import FocalTverskyLoss
+from src.utils.losses import DiceCrossEntropyBoundaryLoss
 from src.utils.metrics import get_iou_score
 
 
@@ -201,7 +201,11 @@ def train(
 
     model_name = model_name or Config.MODEL_NAME
     model = get_model(model_name, n_classes=Config.NUM_CLASSES, pretrained=pretrained).to(Config.DEVICE)
-    criterion = FocalTverskyLoss()
+    criterion = DiceCrossEntropyBoundaryLoss(
+        lambda_edge=Config.EDGE_LOSS_WEIGHT,
+        edge_method=Config.EDGE_TARGET_METHOD,
+        sobel_threshold=Config.EDGE_SOBEL_THRESHOLD,
+    )
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = None
     if Config.SCHEDULER == "plateau":
@@ -358,6 +362,9 @@ def train(
                 "image_size": Config.IMAGE_SIZE,
                 "pretrained": pretrained,
                 "num_classes": Config.NUM_CLASSES,
+                "edge_loss_weight": Config.EDGE_LOSS_WEIGHT,
+                "edge_target_method": Config.EDGE_TARGET_METHOD,
+                "edge_sobel_threshold": Config.EDGE_SOBEL_THRESHOLD,
             },
         }
 
