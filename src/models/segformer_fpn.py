@@ -4,6 +4,62 @@ import torch.nn.functional as F
 import timm
 
 
+class _FeatureInfo:
+    def __init__(self, channels):
+        self._channels = channels
+
+    def channels(self):
+        return self._channels
+
+
+class HFMiTB4Features(nn.Module):
+    """
+    Hugging Face fallback encoder for MiT-B4 when timm model names are unavailable.
+    Returns 4 feature maps in high-res -> low-res order to match FPNFusionDecoder.
+    """
+
+    def __init__(self, pretrained=True):
+        super().__init__()
+        try:
+            from transformers import SegformerConfig, SegformerModel
+        except Exception as exc:
+            raise RuntimeError(
+                "MiT-B4 not found in timm and transformers is unavailable. "
+                "Install: pip install -U transformers"
+            ) from exc
+
+        model_id = "nvidia/mit-b4"
+        if pretrained:
+            self.model = SegformerModel.from_pretrained(model_id)
+        else:
+            cfg = SegformerConfig.from_pretrained(model_id)
+            self.model = SegformerModel(cfg)
+
+        self.feature_info = _FeatureInfo(list(self.model.config.hidden_sizes))
+
+    @staticmethod
+    def _to_nchw(feat):
+        if feat.dim() == 4:
+            return feat
+        if feat.dim() == 3:
+            b, n, c = feat.shape
+            side = int(n ** 0.5)
+            if side * side != n:
+                raise ValueError(f"Cannot reshape token sequence of length {n} to 2D map.")
+            return feat.transpose(1, 2).reshape(b, c, side, side)
+        raise ValueError(f"Unsupported hidden-state shape: {tuple(feat.shape)}")
+
+    def forward(self, x):
+        outputs = self.model(
+            pixel_values=x,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        hidden_states = list(outputs.hidden_states)
+        features = hidden_states[-4:]
+        return [self._to_nchw(feat) for feat in features]
+
+
 class ConvBNReLU(nn.Sequential):
     def __init__(self, in_channels, out_channels, kernel_size=3):
         padding = kernel_size // 2
@@ -62,13 +118,7 @@ class SegFormerB4FPNBoundary(nn.Module):
 
     def __init__(self, n_classes=1, pretrained=True, fpn_channels=128):
         super().__init__()
-        encoder_name = self._resolve_encoder_name()
-        self.encoder = timm.create_model(
-            encoder_name,
-            pretrained=pretrained,
-            features_only=True,
-            out_indices=(0, 1, 2, 3),
-        )
+        self.encoder = self._build_encoder(pretrained=pretrained)
         in_channels = self.encoder.feature_info.channels()
         if len(in_channels) != 4:
             raise ValueError(f"Expected 4 feature scales from MiT-B4, got {len(in_channels)}.")
@@ -103,10 +153,22 @@ class SegFormerB4FPNBoundary(nn.Module):
 
         raise RuntimeError(
             "No MiT-B4 encoder found in installed timm. "
-            "Try: pip install -U 'timm==0.9.16' and restart runtime. "
+            "Will try transformers fallback ('nvidia/mit-b4'). "
             "To inspect available names: python -c \"import timm; print(timm.__version__); "
             "print([m for m in timm.list_models('*mit*') if 'b4' in m])\""
         )
+
+    def _build_encoder(self, pretrained=True):
+        try:
+            encoder_name = self._resolve_encoder_name()
+            return timm.create_model(
+                encoder_name,
+                pretrained=pretrained,
+                features_only=True,
+                out_indices=(0, 1, 2, 3),
+            )
+        except Exception:
+            return HFMiTB4Features(pretrained=pretrained)
 
     def forward(self, x, return_aux=False):
         features = self.encoder(x)
