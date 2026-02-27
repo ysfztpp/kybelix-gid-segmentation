@@ -34,9 +34,13 @@ class HFMiTB4Features(nn.Module):
         else:
             cfg = SegformerConfig.from_pretrained(model_id)
             self.model = SegformerModel(cfg)
-        # Reduces activation memory for deep MiT-B4 transformer blocks.
+        # Reduce activation memory when this transformers build supports it.
         if hasattr(self.model, "gradient_checkpointing_enable"):
-            self.model.gradient_checkpointing_enable()
+            try:
+                self.model.gradient_checkpointing_enable()
+            except Exception:
+                # Some SegformerModel builds define this API but do not support it.
+                pass
 
         self.feature_info = _FeatureInfo(list(self.model.config.hidden_sizes))
 
