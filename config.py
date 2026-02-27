@@ -21,6 +21,7 @@ class Config:
 
     # --- Hiperparametreler (T4 için optimize edildi) ---
     BATCH_SIZE = 8
+    GRAD_ACCUM_STEPS = 1  # Effective batch = BATCH_SIZE * GRAD_ACCUM_STEPS
     EPOCHS = 30
     LEARNING_RATE = 1e-4
     IMAGE_SIZE = 512  # Giriş görüntü boyutu

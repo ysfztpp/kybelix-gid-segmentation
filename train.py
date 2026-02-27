@@ -140,6 +140,9 @@ def train(
     model_name=None,
     epochs=None,
     pretrained=None,
+    batch_size=None,
+    num_workers=None,
+    grad_accum_steps=None,
     max_train_batches=None,
     max_val_batches=None,
     resume=None,
@@ -164,18 +167,23 @@ def train(
         transform=val_transform,
     )
 
+    batch_size = batch_size or Config.BATCH_SIZE
+    num_workers = Config.NUM_WORKERS if num_workers is None else num_workers
+    grad_accum_steps = grad_accum_steps or Config.GRAD_ACCUM_STEPS
+    grad_accum_steps = max(int(grad_accum_steps), 1)
+
     train_loader = DataLoader(
         train_ds,
-        batch_size=Config.BATCH_SIZE,
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=Config.NUM_WORKERS,
+        num_workers=num_workers,
         pin_memory=Config.PIN_MEMORY,
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=Config.BATCH_SIZE,
+        batch_size=batch_size,
         shuffle=False,
-        num_workers=Config.NUM_WORKERS,
+        num_workers=num_workers,
         pin_memory=Config.PIN_MEMORY,
     )
 
@@ -239,7 +247,7 @@ def train(
         early_bad_epochs = 0
 
     # FP16 (Hızlı eğitim için Mixed Precision)
-    scaler = torch.cuda.amp.GradScaler(enabled=Config.DEVICE.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=Config.DEVICE.type == "cuda")
 
     if checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -256,26 +264,35 @@ def train(
     if start_epoch >= epochs:
         raise ValueError(f"Start epoch {start_epoch} is >= total epochs {epochs}.")
 
-    print(f"🚀 Eğitim Başlıyor: {model_name} | Cihaz: {Config.DEVICE} | Run: {run_name}")
+    effective_batch = batch_size * grad_accum_steps
+    print(
+        f"🚀 Eğitim Başlıyor: {model_name} | Cihaz: {Config.DEVICE} | Run: {run_name} | "
+        f"batch={batch_size}, accum={grad_accum_steps}, effective_batch={effective_batch}"
+    )
 
     for epoch in range(start_epoch, epochs):
         model.train()
         train_loss, train_iou, train_steps = 0.0, 0.0, 0
+        optimizer.zero_grad(set_to_none=True)
 
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{epochs}] (train)")
         for step, (images, masks) in enumerate(loop, start=1):
             images, masks = images.to(Config.DEVICE), masks.to(Config.DEVICE)
 
             # Forward pass with Mixed Precision
-            with torch.cuda.amp.autocast(enabled=Config.DEVICE.type == "cuda"):
+            with torch.amp.autocast("cuda", enabled=Config.DEVICE.type == "cuda"):
                 outputs = model(images)
                 loss = criterion(outputs, masks)
 
-            # Backward pass
-            optimizer.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            # Backward pass (supports gradient accumulation for large effective batch size)
+            scaled_loss = loss / grad_accum_steps
+            scaler.scale(scaled_loss).backward()
+
+            is_last_batch = (step == len(train_loader)) or (max_train_batches and step >= max_train_batches)
+            if step % grad_accum_steps == 0 or is_last_batch:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
 
             # Metrikler
             train_loss += loss.item()
@@ -293,8 +310,9 @@ def train(
             vloop = tqdm(val_loader, desc=f"Epoch [{epoch+1}/{epochs}] (val)")
             for step, (images, masks) in enumerate(vloop, start=1):
                 images, masks = images.to(Config.DEVICE), masks.to(Config.DEVICE)
-                outputs = model(images)
-                loss = criterion(outputs, masks)
+                with torch.amp.autocast("cuda", enabled=Config.DEVICE.type == "cuda"):
+                    outputs = model(images)
+                    loss = criterion(outputs, masks)
                 val_loss += loss.item()
                 val_iou += get_iou_score(outputs, masks)
                 val_steps += 1
@@ -358,7 +376,10 @@ def train(
             },
             "config": {
                 "learning_rate": learning_rate,
-                "batch_size": Config.BATCH_SIZE,
+                "batch_size": batch_size,
+                "grad_accum_steps": grad_accum_steps,
+                "effective_batch_size": effective_batch,
+                "num_workers": num_workers,
                 "image_size": Config.IMAGE_SIZE,
                 "pretrained": pretrained,
                 "num_classes": Config.NUM_CLASSES,
@@ -404,6 +425,9 @@ if __name__ == "__main__":
     parser.add_argument("--model-name", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--grad-accum-steps", type=int, default=None)
     parser.add_argument("--pretrained", action="store_true")
     parser.add_argument("--no-pretrained", dest="pretrained", action="store_false")
     parser.set_defaults(pretrained=None)
@@ -426,6 +450,9 @@ if __name__ == "__main__":
         model_name=args.model_name,
         epochs=args.epochs,
         pretrained=args.pretrained,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        grad_accum_steps=args.grad_accum_steps,
         max_train_batches=args.max_train_batches,
         max_val_batches=args.max_val_batches,
         resume=args.resume,

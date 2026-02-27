@@ -30,10 +30,13 @@ class HFMiTB4Features(nn.Module):
 
         model_id = "nvidia/mit-b4"
         if pretrained:
-            self.model = SegformerModel.from_pretrained(model_id)
+            self.model = SegformerModel.from_pretrained(model_id, use_safetensors=False)
         else:
             cfg = SegformerConfig.from_pretrained(model_id)
             self.model = SegformerModel(cfg)
+        # Reduces activation memory for deep MiT-B4 transformer blocks.
+        if hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model.gradient_checkpointing_enable()
 
         self.feature_info = _FeatureInfo(list(self.model.config.hidden_sizes))
 
