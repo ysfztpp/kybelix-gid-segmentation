@@ -1,3 +1,4 @@
+from .segformer_fpn import SegFormerB4FPNBoundary
 from .unet import AttEfficientUNetB0, AttEfficientUNetB4, SpaceNativeGhostNet
 
 def get_model(model_name, n_classes=1, pretrained=True):
@@ -14,6 +15,12 @@ def get_model(model_name, n_classes=1, pretrained=True):
     
     elif model_name == "ghostnet":
         return SpaceNativeGhostNet(n_classes=n_classes, pretrained=pretrained)
+
+    elif model_name in {"segformer_b4", "mit_b4", "segformer"}:
+        return SegFormerB4FPNBoundary(n_classes=n_classes, pretrained=pretrained)
     
     else:
-        raise ValueError(f"HATA: '{model_name}' isminde bir model tanımlı değil. (b0, b4, ghostnet) deneyin.")
+        raise ValueError(
+            f"HATA: '{model_name}' isminde bir model tanımlı değil. "
+            "(b0, b4, ghostnet, segformer_b4) deneyin."
+        )

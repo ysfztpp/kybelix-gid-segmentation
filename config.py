@@ -8,18 +8,27 @@ class Config:
     SEED = 42
 
     # --- Model Seçimi ---
-    # Seçenekler: "b0", "b4", "ghostnet"
-    MODEL_NAME = "b4"
+    # Seçenekler: "b0", "b4", "ghostnet", "segformer_b4"
+    MODEL_NAME = "segformer_b4"
     NUM_CLASSES = 1
     PRETRAINED = True
 
+    # --- Boundary-aware yardımcı kayıp ---
+    # Total Loss = Dice(seg) + CrossEntropy(seg) + lambda * BCE(edge)
+    EDGE_LOSS_WEIGHT = 0.4  # 0.3 - 0.5 arası önerilir
+    EDGE_TARGET_METHOD = "sobel"  # "sobel" veya "morph"
+    EDGE_SOBEL_THRESHOLD = 0.1
+
     # --- Hiperparametreler (T4 için optimize edildi) ---
     BATCH_SIZE = 8
+    GRAD_ACCUM_STEPS = 1  # Effective batch = BATCH_SIZE * GRAD_ACCUM_STEPS
     EPOCHS = 30
     LEARNING_RATE = 1e-4
     IMAGE_SIZE = 512  # Giriş görüntü boyutu
     NUM_WORKERS = 2
     PIN_MEMORY = True
+    PROGRESS_BAR = False  # Colab !python çıktısında satır spam'ini engeller
+    LOG_INTERVAL = 100  # progress bar kapalıyken kaç adımda bir log basılsın
 
     # --- Veri Seti Ayarları ---
     TARGET_COLOR = [0, 255, 0]  # GID Dataset yeşil alanlar
@@ -56,7 +65,7 @@ class Config:
     LOCAL_CHECKPOINT_DIR = os.path.join(LOCAL_RUNS_ROOT, "checkpoints")
 
     # --- Resume Ayarları ---
-    # Örnek: "checkpoints/<run_name>/b4_last.pth"
+    # Örnek: "checkpoints/<run_name>/segformer_b4_last.pth"
     RESUME_PATH = None
     # True ise optimizer state yüklenmez
     RESET_OPTIMIZER = False
