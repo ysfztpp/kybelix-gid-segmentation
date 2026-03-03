@@ -62,7 +62,7 @@ Resume Training
 Early Stopping + Scheduler
 - Controlled from config.py:
   EARLY_STOPPING, EARLY_STOPPING_PATIENCE, EARLY_STOPPING_MIN_DELTA
-  EARLY_STOPPING_MONITOR (val_iou or val_loss)
+  EARLY_STOPPING_MONITOR (val_iou, val_miou, val_kappa, val_oa, val_loss)
   SCHEDULER (plateau or None), SCHEDULER_PATIENCE, SCHEDULER_FACTOR, SCHEDULER_MIN_LR
 
 Models
@@ -75,3 +75,16 @@ Loss (current default)
 - Dice(seg) + CrossEntropy(seg) + lambda * BCE(edge)
 - edge target: Sobel (or morph gradient, configurable in config.py)
 - boundary head is used as training regularizer; inference uses segmentation output.
+
+Metrics (current training logs)
+- train.py logs and plots:
+  train/val IoU, mIoU, Kappa, OA, loss, learning rate
+- IoU is preserved as the original metric.
+- mIoU is computed as mean of foreground-IoU and background-IoU for binary segmentation.
+
+Best Threshold Search (for binary farmland mask)
+- Script: evaluate_thresholds.py
+- Sweeps thresholds on validation data and saves:
+  - threshold_metrics.csv
+  - threshold_metrics.png
+- Selects best threshold by highest Kappa (tie-break: mIoU, OA, foreground IoU).
