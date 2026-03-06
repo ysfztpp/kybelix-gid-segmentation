@@ -585,7 +585,7 @@ def train(
     reporting_top_k = max(int(getattr(Config, "REPORTING_TOP_K", 10)), 0)
     reporting_stats_dir = str(getattr(Config, "REPORTING_STATS_DIR_NAME", "stats"))
     rdrop_enabled = bool(getattr(Config, "ENABLE_R_DROP", True))
-    rdrop_alpha = float(getattr(Config, "R_DROP_ALPHA", 0.5))
+    rdrop_alpha = float(getattr(Config, "R_DROP_ALPHA", 0.3))
     rdrop_start_epoch = max(int(getattr(Config, "R_DROP_START_EPOCH", 1)), 1)
     use_tqdm = progress_bar and sys.stdout.isatty()
 
@@ -630,6 +630,9 @@ def train(
         lambda_edge=Config.EDGE_LOSS_WEIGHT,
         edge_method=Config.EDGE_TARGET_METHOD,
         sobel_threshold=Config.EDGE_SOBEL_THRESHOLD,
+        enable_lovasz=bool(getattr(Config, "ENABLE_LOVASZ", True)),
+        lovasz_weight=float(getattr(Config, "LOVASZ_WEIGHT", 0.3)),
+        lovasz_per_image=bool(getattr(Config, "LOVASZ_PER_IMAGE", True)),
     )
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = None
@@ -935,6 +938,9 @@ def train(
                 "edge_loss_weight": Config.EDGE_LOSS_WEIGHT,
                 "edge_target_method": Config.EDGE_TARGET_METHOD,
                 "edge_sobel_threshold": Config.EDGE_SOBEL_THRESHOLD,
+                "enable_lovasz": bool(getattr(Config, "ENABLE_LOVASZ", True)),
+                "lovasz_weight": float(getattr(Config, "LOVASZ_WEIGHT", 0.3)),
+                "lovasz_per_image": bool(getattr(Config, "LOVASZ_PER_IMAGE", True)),
                 "enable_r_drop": rdrop_enabled,
                 "r_drop_alpha": rdrop_alpha,
                 "r_drop_start_epoch": rdrop_start_epoch,

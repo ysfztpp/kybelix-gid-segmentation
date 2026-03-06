@@ -4,6 +4,75 @@ import torch.nn.functional as F
 
 from .model_outputs import split_model_outputs
 
+
+def _lovasz_grad(gt_sorted):
+    gts = gt_sorted.sum()
+    intersection = gts - gt_sorted.float().cumsum(0)
+    union = gts + (1.0 - gt_sorted).float().cumsum(0)
+    jaccard = 1.0 - intersection / union
+    if gt_sorted.numel() > 1:
+        jaccard[1:] = jaccard[1:] - jaccard[:-1]
+    return jaccard
+
+
+def _lovasz_hinge_flat(logits, labels):
+    if labels.numel() == 0:
+        return logits.sum() * 0.0
+    signs = 2.0 * labels.float() - 1.0
+    errors = 1.0 - logits * signs
+    errors_sorted, perm = torch.sort(errors, descending=True)
+    labels_sorted = labels[perm]
+    grad = _lovasz_grad(labels_sorted)
+    return torch.dot(F.relu(errors_sorted), grad)
+
+
+def lovasz_hinge(logits, labels, per_image=True):
+    if per_image:
+        losses = []
+        for logit, label in zip(logits, labels):
+            losses.append(_lovasz_hinge_flat(logit.view(-1), label.view(-1)))
+        return torch.stack(losses).mean() if losses else logits.sum() * 0.0
+    return _lovasz_hinge_flat(logits.view(-1), labels.view(-1))
+
+
+def _flatten_probas(probas, labels):
+    if probas.dim() == 3:
+        probas = probas.unsqueeze(1)
+    c = probas.shape[1]
+    probas = probas.permute(0, 2, 3, 1).contiguous().view(-1, c)
+    labels = labels.view(-1)
+    return probas, labels
+
+
+def _lovasz_softmax_flat(probas, labels):
+    if probas.numel() == 0:
+        return probas.sum() * 0.0
+    num_classes = probas.shape[1]
+    losses = []
+    for class_id in range(num_classes):
+        foreground = (labels == class_id).float()
+        if foreground.sum() == 0:
+            continue
+        class_pred = probas[:, class_id]
+        errors = (foreground - class_pred).abs()
+        errors_sorted, perm = torch.sort(errors, descending=True)
+        foreground_sorted = foreground[perm]
+        losses.append(torch.dot(errors_sorted, _lovasz_grad(foreground_sorted)))
+    if not losses:
+        return probas.sum() * 0.0
+    return torch.stack(losses).mean()
+
+
+def lovasz_softmax(probas, labels, per_image=False):
+    if per_image:
+        losses = []
+        for prob, label in zip(probas, labels):
+            prob_flat, label_flat = _flatten_probas(prob.unsqueeze(0), label.unsqueeze(0))
+            losses.append(_lovasz_softmax_flat(prob_flat, label_flat))
+        return torch.stack(losses).mean() if losses else probas.sum() * 0.0
+    prob_flat, label_flat = _flatten_probas(probas, labels)
+    return _lovasz_softmax_flat(prob_flat, label_flat)
+
 class FocalTverskyLoss(nn.Module):
     """
     Dengesiz sınıflar için (örneğin arazideki az bulunan yeşil alanlar) 
@@ -93,11 +162,22 @@ class DiceCrossEntropyBoundaryLoss(nn.Module):
     Total Loss = Dice(seg) + CrossEntropy(seg) + lambda * BCE(edge)
     """
 
-    def __init__(self, lambda_edge=0.4, edge_method="sobel", sobel_threshold=0.1):
+    def __init__(
+        self,
+        lambda_edge=0.4,
+        edge_method="sobel",
+        sobel_threshold=0.1,
+        enable_lovasz=False,
+        lovasz_weight=0.3,
+        lovasz_per_image=True,
+    ):
         super().__init__()
         self.lambda_edge = lambda_edge
         self.edge_method = edge_method
         self.sobel_threshold = sobel_threshold
+        self.enable_lovasz = enable_lovasz
+        self.lovasz_weight = lovasz_weight
+        self.lovasz_per_image = lovasz_per_image
 
         self.dice_loss = DiceLoss()
         self.bce_seg = nn.BCEWithLogitsLoss()
@@ -131,6 +211,34 @@ class DiceCrossEntropyBoundaryLoss(nn.Module):
             seg_logits = F.interpolate(seg_logits, size=target_size, mode="bilinear", align_corners=False)
 
         seg_loss = self.dice_loss(seg_logits, targets) + self._cross_entropy_seg(seg_logits, targets)
+
+        if self.enable_lovasz and self.lovasz_weight > 0:
+            if seg_logits.shape[1] == 1:
+                binary_targets = targets
+                if binary_targets.dim() == 4 and binary_targets.shape[1] == 1:
+                    binary_targets = binary_targets[:, 0]
+                binary_targets = binary_targets.float()
+                lovasz = lovasz_hinge(
+                    logits=seg_logits[:, 0],
+                    labels=binary_targets,
+                    per_image=self.lovasz_per_image,
+                )
+            else:
+                if targets.dim() == 4:
+                    if targets.shape[1] == 1:
+                        class_targets = targets.squeeze(1).long()
+                    else:
+                        class_targets = targets.argmax(dim=1).long()
+                else:
+                    class_targets = targets.long()
+                probs = torch.softmax(seg_logits, dim=1)
+                lovasz = lovasz_softmax(
+                    probas=probs,
+                    labels=class_targets,
+                    per_image=self.lovasz_per_image,
+                )
+            seg_loss = seg_loss + (self.lovasz_weight * lovasz)
+
         if edge_logits is None or self.lambda_edge <= 0:
             return seg_loss
 

@@ -150,8 +150,14 @@ class Config:
     # --- R-Drop (default açık) ---
     # İki forward ile tutarlılık regularization: loss = sup_avg + alpha * KL
     ENABLE_R_DROP = True
-    R_DROP_ALPHA = 0.5
+    R_DROP_ALPHA = 0.3
     R_DROP_START_EPOCH = 1
+
+    # --- Lovasz (mIoU hedefli ek loss, default açık) ---
+    # Toplam seg loss: Dice + CE + LOVASZ_WEIGHT * Lovasz
+    ENABLE_LOVASZ = True
+    LOVASZ_WEIGHT = 0.3
+    LOVASZ_PER_IMAGE = True
 
     # --- Veri Seti Ayarları ---
     TARGET_COLOR = [0, 255, 0]  # GID Dataset yeşil alanlar
