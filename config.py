@@ -29,6 +29,7 @@ class Config:
     PIN_MEMORY = True
     PROGRESS_BAR = False  # Colab !python çıktısında satır spam'ini engeller
     LOG_INTERVAL = 100  # progress bar kapalıyken kaç adımda bir log basılsın
+    METRIC_THRESHOLD = 0.5  # Binary metriklerde (IoU/mIoU/Kappa/OA) eşik değeri
 
     # --- Veri Seti Ayarları ---
     TARGET_COLOR = [0, 255, 0]  # GID Dataset yeşil alanlar
@@ -74,7 +75,7 @@ class Config:
     EARLY_STOPPING = True
     EARLY_STOPPING_PATIENCE = 5
     EARLY_STOPPING_MIN_DELTA = 1e-4
-    EARLY_STOPPING_MONITOR = "val_iou"  # "val_iou" veya "val_loss"
+    EARLY_STOPPING_MONITOR = "val_iou"  # val_iou, val_miou, val_kappa, val_oa, val_loss
 
     # --- LR Scheduler ---
     SCHEDULER = "plateau"  # None veya "plateau"
