@@ -355,141 +355,139 @@ def _write_validation_summary(records: list[dict], out_path: Path):
 
 def _build_error_overlay(
     image_rgb: np.ndarray,
-    intersection: np.ndarray,
     false_positive: np.ndarray,
     false_negative: np.ndarray,
 ) -> np.ndarray:
     overlay = image_rgb.astype(np.float32)
     highlight = np.zeros_like(overlay)
-    highlight[intersection == 1] = np.array([0, 255, 0], dtype=np.float32)
     highlight[false_positive == 1] = np.array([255, 0, 0], dtype=np.float32)
-    highlight[false_negative == 1] = np.array([0, 0, 255], dtype=np.float32)
+    highlight[false_negative == 1] = np.array([0, 170, 255], dtype=np.float32)
 
-    active = (intersection == 1) | (false_positive == 1) | (false_negative == 1)
+    active = (false_positive == 1) | (false_negative == 1)
     overlay[active] = 0.60 * overlay[active] + 0.40 * highlight[active]
     return np.clip(overlay, 0, 255).astype(np.uint8)
 
 
-def _save_poor_validation_samples(
-    model: torch.nn.Module,
-    dataset: GIDDataset,
-    sample_records: list[dict],
-    metric_threshold: float,
-    out_dir: Path,
-    top_k: int,
-):
-    if not sample_records or top_k <= 0:
+def _record_is_worse(a: dict, b: dict) -> bool:
+    return (a["iou"], -a["diff_ratio"]) < (b["iou"], -b["diff_ratio"])
+
+
+def _update_worst_samples(worst_samples: list[dict], candidate: dict, top_k: int) -> list[dict]:
+    if top_k <= 0:
+        return worst_samples
+    if len(worst_samples) < top_k:
+        worst_samples.append(candidate)
+        return worst_samples
+
+    best_idx = 0
+    best_item = worst_samples[0]
+    for idx in range(1, len(worst_samples)):
+        item = worst_samples[idx]
+        if _record_is_worse(best_item, item):
+            best_idx = idx
+            best_item = item
+
+    if _record_is_worse(candidate, best_item):
+        worst_samples[best_idx] = candidate
+    return worst_samples
+
+
+def _save_poor_validation_samples(sample_records: list[dict], out_dir: Path):
+    if not sample_records:
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    worst = sorted(sample_records, key=lambda r: (r["iou"], -r["diff_ratio"]))[: min(top_k, len(sample_records))]
-    was_training = model.training
-    model.eval()
+    worst = sorted(sample_records, key=lambda r: (r["iou"], -r["diff_ratio"]))
 
-    with torch.no_grad():
-        for rank, record in enumerate(worst, start=1):
-            sample_idx = int(record["sample_index"])
-            image_name = str(record["image_name"])
-            image_tensor, mask_tensor = dataset[sample_idx]
+    for rank, record in enumerate(worst, start=1):
+        sample_idx = int(record["sample_index"])
+        image_name = str(record["image_name"])
+        image_rgb = record["image_rgb"]
+        true_mask = record["true_mask"]
+        pred_mask = record["pred_mask"]
 
-            image_batch = image_tensor.unsqueeze(0).to(Config.DEVICE)
-            mask_batch = mask_tensor.unsqueeze(0).to(Config.DEVICE)
+        intersection = (pred_mask & true_mask).astype(np.uint8)
+        union = (pred_mask | true_mask).astype(np.uint8)
+        difference = (union & (1 - intersection)).astype(np.uint8)
+        false_positive = (pred_mask & (1 - true_mask)).astype(np.uint8)
+        false_negative = ((1 - pred_mask) & true_mask).astype(np.uint8)
+        background = (1 - union).astype(np.uint8)
 
-            outputs = model(image_batch)
-            seg_logits = get_segmentation_logits(outputs)
-            if seg_logits.shape[-2:] != mask_batch.shape[-2:]:
-                seg_logits = F.interpolate(
-                    seg_logits,
-                    size=mask_batch.shape[-2:],
-                    mode="bilinear",
-                    align_corners=False,
-                )
+        overlay = _build_error_overlay(image_rgb, false_positive, false_negative)
 
-            pred_mask = (torch.sigmoid(seg_logits)[0, 0] > metric_threshold).to(torch.uint8).cpu().numpy()
-            true_mask = (mask_tensor[0] > 0.5).to(torch.uint8).cpu().numpy()
+        sample_stem = Path(image_name).stem or f"sample_{sample_idx:06d}"
+        safe_stem = _safe_path_fragment(sample_stem)
+        sample_dir = out_dir / f"rank_{rank:03d}_{safe_stem}_{sample_idx:06d}"
+        sample_dir.mkdir(parents=True, exist_ok=True)
 
-            intersection = (pred_mask & true_mask).astype(np.uint8)
-            union = (pred_mask | true_mask).astype(np.uint8)
-            difference = (union & (1 - intersection)).astype(np.uint8)
-            false_positive = (pred_mask & (1 - true_mask)).astype(np.uint8)
-            false_negative = ((1 - pred_mask) & true_mask).astype(np.uint8)
-            background = (1 - union).astype(np.uint8)
+        plt.imsave(sample_dir / "image.png", image_rgb)
+        plt.imsave(sample_dir / "error_overlay.png", overlay)
+        _save_binary_mask(sample_dir / "mask_true.png", true_mask)
+        _save_binary_mask(sample_dir / "mask_pred.png", pred_mask)
+        _save_binary_mask(sample_dir / "mask_intersection.png", intersection)
+        _save_binary_mask(sample_dir / "mask_union.png", union)
+        _save_binary_mask(sample_dir / "mask_difference_union_minus_intersection.png", difference)
+        _save_binary_mask(sample_dir / "mask_false_positive_extra.png", false_positive)
+        _save_binary_mask(sample_dir / "mask_false_negative_missing.png", false_negative)
+        _save_binary_mask(sample_dir / "mask_background.png", background)
 
-            image_rgb = _tensor_image_to_uint8(image_tensor)
-            overlay = _build_error_overlay(image_rgb, intersection, false_positive, false_negative)
+        error_map = np.zeros((true_mask.shape[0], true_mask.shape[1], 3), dtype=np.uint8)
+        error_map[false_positive == 1] = np.array([255, 0, 0], dtype=np.uint8)   # extra
+        error_map[false_negative == 1] = np.array([0, 170, 255], dtype=np.uint8)  # missing
+        plt.imsave(sample_dir / "error_map_fp_red_fn_cyan.png", error_map)
 
-            sample_stem = Path(image_name).stem or f"sample_{sample_idx:06d}"
-            safe_stem = _safe_path_fragment(sample_stem)
-            sample_dir = out_dir / f"rank_{rank:03d}_{safe_stem}_{sample_idx:06d}"
-            sample_dir.mkdir(parents=True, exist_ok=True)
+        panels = [
+            (image_rgb, "Image", None),
+            (overlay, "Overlay (FP red / FN cyan)", None),
+            (true_mask, "GT Mask", "gray"),
+            (pred_mask, "Pred Mask", "gray"),
+            (error_map, "Error Map", None),
+            (background, "Background", "gray"),
+            (intersection, "Intersection", "gray"),
+            (union, "Union", "gray"),
+            (false_positive, "FP (Extra)", "gray"),
+            (false_negative, "FN (Missing)", "gray"),
+        ]
+        fig, axes = plt.subplots(2, 5, figsize=(20, 8))
+        for ax, (arr, title, cmap) in zip(axes.flat, panels):
+            if cmap:
+                ax.imshow(arr, cmap=cmap, vmin=0, vmax=1)
+            else:
+                ax.imshow(arr)
+            ax.set_title(title)
+            ax.axis("off")
+        fig.suptitle(
+            f"rank={rank} | iou={record['iou']:.4f} | diff_ratio={record['diff_ratio']:.4f} | {image_name}",
+            fontsize=11,
+        )
+        fig.tight_layout()
+        fig.savefig(sample_dir / "panel.png", dpi=150)
+        plt.close(fig)
 
-            plt.imsave(sample_dir / "image.png", image_rgb)
-            plt.imsave(sample_dir / "overlay.png", overlay)
-            _save_binary_mask(sample_dir / "mask_true.png", true_mask)
-            _save_binary_mask(sample_dir / "mask_pred.png", pred_mask)
-            _save_binary_mask(sample_dir / "mask_intersection.png", intersection)
-            _save_binary_mask(sample_dir / "mask_union.png", union)
-            _save_binary_mask(sample_dir / "mask_difference_union_minus_intersection.png", difference)
-            _save_binary_mask(sample_dir / "mask_false_positive.png", false_positive)
-            _save_binary_mask(sample_dir / "mask_false_negative.png", false_negative)
-            _save_binary_mask(sample_dir / "mask_background.png", background)
-
-            panels = [
-                (image_rgb, "Image", None),
-                (overlay, "Overlay (TP/FP/FN)", None),
-                (true_mask, "GT Mask", "gray"),
-                (pred_mask, "Pred Mask", "gray"),
-                (background, "Background", "gray"),
-                (intersection, "Intersection", "gray"),
-                (union, "Union", "gray"),
-                (difference, "Union - Intersection", "gray"),
-                (false_positive, "False Positive", "gray"),
-                (false_negative, "False Negative", "gray"),
-            ]
-            fig, axes = plt.subplots(2, 5, figsize=(20, 8))
-            for ax, (arr, title, cmap) in zip(axes.flat, panels):
-                if cmap:
-                    ax.imshow(arr, cmap=cmap, vmin=0, vmax=1)
-                else:
-                    ax.imshow(arr)
-                ax.set_title(title)
-                ax.axis("off")
-            fig.suptitle(
-                f"rank={rank} | iou={record['iou']:.4f} | diff_ratio={record['diff_ratio']:.4f} | {image_name}",
-                fontsize=11,
-            )
-            fig.tight_layout()
-            fig.savefig(sample_dir / "panel.png", dpi=150)
-            plt.close(fig)
-
-            details = [
-                f"sample_index={sample_idx}",
-                f"image_name={image_name}",
-                f"iou={record['iou']:.6f}",
-                f"diff_ratio={record['diff_ratio']:.6f}",
-                f"tp={record['tp']}",
-                f"fp={record['fp']}",
-                f"tn={record['tn']}",
-                f"fn={record['fn']}",
-                f"fg_pixels={record['fg_pixels']}",
-                f"pred_pixels={record['pred_pixels']}",
-                f"union_pixels={record['union_pixels']}",
-            ]
-            (sample_dir / "metrics.txt").write_text("\n".join(details) + "\n")
-
-    if was_training:
-        model.train()
+        details = [
+            f"sample_index={sample_idx}",
+            f"image_name={image_name}",
+            f"iou={record['iou']:.6f}",
+            f"diff_ratio={record['diff_ratio']:.6f}",
+            f"tp={record['tp']}",
+            f"fp={record['fp']}",
+            f"tn={record['tn']}",
+            f"fn={record['fn']}",
+            f"fg_pixels={record['fg_pixels']}",
+            f"pred_pixels={record['pred_pixels']}",
+            f"union_pixels={record['union_pixels']}",
+            "legend_fp=extra_predicted(red)",
+            "legend_fn=missing_predicted(cyan)",
+        ]
+        (sample_dir / "metrics.txt").write_text("\n".join(details) + "\n")
 
 
 def _save_validation_epoch_report(
-    model: torch.nn.Module,
-    dataset: GIDDataset,
     records: list[dict],
+    worst_samples: list[dict],
     result_dir: Path,
     epoch_num: int,
-    metric_threshold: float,
     stats_dir_name: str,
-    top_k: int,
 ):
     if not records:
         return
@@ -503,14 +501,7 @@ def _save_validation_epoch_report(
     _plot_validation_iou_hist(records, charts_dir / "iou_histogram.png")
     _plot_validation_iou_box(records, charts_dir / "iou_boxplot.png")
     _plot_validation_outlier_scatter(records, charts_dir / "iou_vs_difference_ratio.png")
-    _save_poor_validation_samples(
-        model=model,
-        dataset=dataset,
-        sample_records=records,
-        metric_threshold=metric_threshold,
-        out_dir=poor_dir,
-        top_k=top_k,
-    )
+    _save_poor_validation_samples(sample_records=worst_samples, out_dir=poor_dir)
 
 
 def train(
@@ -715,6 +706,7 @@ def train(
         val_loss, val_iou, val_steps = 0.0, 0.0, 0
         val_tp, val_fp, val_tn, val_fn = 0.0, 0.0, 0.0, 0.0
         val_sample_records = [] if reporting_enabled else None
+        worst_samples = [] if reporting_enabled and reporting_top_k > 0 else None
         seen_val_samples = 0
         with torch.no_grad():
             if use_tqdm:
@@ -728,7 +720,7 @@ def train(
                     loss = criterion(outputs, masks)
 
                 seg_logits = get_segmentation_logits(outputs)
-                _, _, tp_batch, fp_batch, tn_batch, fn_batch, iou_batch = _compute_binary_batch_stats(
+                preds_batch, labels_batch, tp_batch, fp_batch, tn_batch, fn_batch, iou_batch = _compute_binary_batch_stats(
                     seg_logits=seg_logits,
                     labels=masks,
                     threshold=metric_threshold,
@@ -770,6 +762,31 @@ def train(
                                 "union_pixels": union_pixels,
                             }
                         )
+
+                        if worst_samples is not None:
+                            image_rgb = _tensor_image_to_uint8(images[batch_idx])
+                            true_mask = (labels_batch[batch_idx, 0] > 0.5).to(torch.uint8).detach().cpu().numpy()
+                            pred_mask = (preds_batch[batch_idx, 0] > 0.5).to(torch.uint8).detach().cpu().numpy()
+                            worst_samples = _update_worst_samples(
+                                worst_samples=worst_samples,
+                                candidate={
+                                    "sample_index": sample_index,
+                                    "image_name": _dataset_sample_name(val_ds, sample_index),
+                                    "iou": float(iou_batch[batch_idx].item()),
+                                    "diff_ratio": float(diff_ratio),
+                                    "tp": tp_val,
+                                    "fp": fp_val,
+                                    "tn": tn_val,
+                                    "fn": fn_val,
+                                    "fg_pixels": fg_pixels,
+                                    "pred_pixels": pred_pixels,
+                                    "union_pixels": union_pixels,
+                                    "image_rgb": image_rgb,
+                                    "true_mask": true_mask,
+                                    "pred_mask": pred_mask,
+                                },
+                                top_k=reporting_top_k,
+                            )
                     seen_val_samples += batch_size_curr
 
                 val_steps += 1
@@ -814,14 +831,11 @@ def train(
         _plot_metrics(history, result_dir / "metrics.png")
         if reporting_enabled and val_sample_records:
             _save_validation_epoch_report(
-                model=model,
-                dataset=val_ds,
                 records=val_sample_records,
+                worst_samples=worst_samples or [],
                 result_dir=result_dir,
                 epoch_num=epoch + 1,
-                metric_threshold=metric_threshold,
                 stats_dir_name=reporting_stats_dir,
-                top_k=reporting_top_k,
             )
 
         is_best = epoch_metrics["val_iou"] >= best_val_iou
