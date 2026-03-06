@@ -56,6 +56,18 @@ Validation Reporting (per-epoch diagnostics)
     image, overlay, GT/pred masks, intersection, union, union-minus-intersection,
     false-positive, false-negative, background, and a combined panel.
 
+R-Drop Regularization
+- Enabled by default in config.py:
+  - `ENABLE_R_DROP = True`
+  - `R_DROP_ALPHA = 0.5`
+  - `R_DROP_START_EPOCH = 1`
+- Training behavior:
+  - Two stochastic forward passes per train batch.
+  - Final train loss: `0.5*(sup_loss_a + sup_loss_b) + alpha*sym_kl(seg_logits_a, seg_logits_b)`.
+- Notes:
+  - Improves generalization in many segmentation setups but increases train-time cost.
+  - Disable quickly by setting `ENABLE_R_DROP = False`.
+
 How To Train
 1) Install:
    pip install -r requirements.txt

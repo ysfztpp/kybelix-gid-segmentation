@@ -147,6 +147,12 @@ class Config:
     REPORTING_TOP_K = 10  # En kötü kaç örnek detaylı kaydedilsin
     REPORTING_STATS_DIR_NAME = "stats"  # results/<run_name>/stats/epoch_XXX
 
+    # --- R-Drop (default açık) ---
+    # İki forward ile tutarlılık regularization: loss = sup_avg + alpha * KL
+    ENABLE_R_DROP = True
+    R_DROP_ALPHA = 0.5
+    R_DROP_START_EPOCH = 1
+
     # --- Veri Seti Ayarları ---
     TARGET_COLOR = [0, 255, 0]  # GID Dataset yeşil alanlar
     USE_AUGMENTATION = True

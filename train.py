@@ -245,6 +245,39 @@ def _compute_binary_batch_stats(seg_logits: torch.Tensor, labels: torch.Tensor, 
     return preds, labels, tp, fp, tn, fn, iou
 
 
+def _symmetric_kl_segmentation(seg_logits_a: torch.Tensor, seg_logits_b: torch.Tensor) -> torch.Tensor:
+    if seg_logits_a.shape[-2:] != seg_logits_b.shape[-2:]:
+        seg_logits_b = F.interpolate(
+            seg_logits_b,
+            size=seg_logits_a.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+
+    a = seg_logits_a.float()
+    b = seg_logits_b.float()
+
+    if a.shape[1] == 1:
+        eps = 1e-7
+        pa = torch.sigmoid(a).clamp(min=eps, max=1.0 - eps)
+        pb = torch.sigmoid(b).clamp(min=eps, max=1.0 - eps)
+        kl_ab = pa * (torch.log(pa) - torch.log(pb)) + (1.0 - pa) * (
+            torch.log(1.0 - pa) - torch.log(1.0 - pb)
+        )
+        kl_ba = pb * (torch.log(pb) - torch.log(pa)) + (1.0 - pb) * (
+            torch.log(1.0 - pb) - torch.log(1.0 - pa)
+        )
+        return 0.5 * (kl_ab.mean() + kl_ba.mean())
+
+    log_pa = F.log_softmax(a, dim=1)
+    log_pb = F.log_softmax(b, dim=1)
+    pb = F.softmax(b, dim=1)
+    pa = F.softmax(a, dim=1)
+    kl_ab = F.kl_div(log_pa, pb, reduction="none").sum(dim=1).mean()
+    kl_ba = F.kl_div(log_pb, pa, reduction="none").sum(dim=1).mean()
+    return 0.5 * (kl_ab + kl_ba)
+
+
 def _write_validation_samples_csv(records: list[dict], out_path: Path):
     if not records:
         return
@@ -551,6 +584,9 @@ def train(
     reporting_enabled = bool(getattr(Config, "ENABLE_VALIDATION_REPORTING", False))
     reporting_top_k = max(int(getattr(Config, "REPORTING_TOP_K", 10)), 0)
     reporting_stats_dir = str(getattr(Config, "REPORTING_STATS_DIR_NAME", "stats"))
+    rdrop_enabled = bool(getattr(Config, "ENABLE_R_DROP", True))
+    rdrop_alpha = float(getattr(Config, "R_DROP_ALPHA", 0.5))
+    rdrop_start_epoch = max(int(getattr(Config, "R_DROP_START_EPOCH", 1)), 1)
     use_tqdm = progress_bar and sys.stdout.isatty()
 
     train_loader = DataLoader(
@@ -649,10 +685,12 @@ def train(
     print(
         f"🚀 Eğitim Başlıyor: {model_name} | Cihaz: {Config.DEVICE} | Run: {run_name} | "
         f"batch={batch_size}, accum={grad_accum_steps}, effective_batch={effective_batch}, "
-        f"metric_threshold={metric_threshold:.3f}"
+        f"metric_threshold={metric_threshold:.3f}, "
+        f"r_drop={'on' if rdrop_enabled else 'off'}(alpha={rdrop_alpha}, start_epoch={rdrop_start_epoch})"
     )
 
     for epoch in range(start_epoch, epochs):
+        use_rdrop_this_epoch = rdrop_enabled and (epoch + 1 >= rdrop_start_epoch)
         model.train()
         train_loss, train_iou, train_steps = 0.0, 0.0, 0
         train_tp, train_fp, train_tn, train_fn = 0.0, 0.0, 0.0, 0.0
@@ -669,6 +707,13 @@ def train(
             with torch.amp.autocast("cuda", enabled=Config.DEVICE.type == "cuda"):
                 outputs = model(images)
                 loss = criterion(outputs, masks)
+                if use_rdrop_this_epoch:
+                    outputs_rdrop = model(images)
+                    loss_rdrop = criterion(outputs_rdrop, masks)
+                    seg_logits_main = get_segmentation_logits(outputs)
+                    seg_logits_rdrop = get_segmentation_logits(outputs_rdrop)
+                    consistency_kl = _symmetric_kl_segmentation(seg_logits_main, seg_logits_rdrop)
+                    loss = 0.5 * (loss + loss_rdrop) + (rdrop_alpha * consistency_kl)
 
             # Backward pass (supports gradient accumulation for large effective batch size)
             scaled_loss = loss / grad_accum_steps
@@ -890,6 +935,9 @@ def train(
                 "edge_loss_weight": Config.EDGE_LOSS_WEIGHT,
                 "edge_target_method": Config.EDGE_TARGET_METHOD,
                 "edge_sobel_threshold": Config.EDGE_SOBEL_THRESHOLD,
+                "enable_r_drop": rdrop_enabled,
+                "r_drop_alpha": rdrop_alpha,
+                "r_drop_start_epoch": rdrop_start_epoch,
                 "enable_validation_reporting": reporting_enabled,
                 "reporting_top_k": reporting_top_k,
                 "reporting_stats_dir_name": reporting_stats_dir,
