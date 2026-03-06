@@ -144,7 +144,10 @@ class Config:
     # False: mevcut hızlı akış (rapor üretmez)
     # True: her epoch için detaylı validation raporu üretir
     ENABLE_VALIDATION_REPORTING = True
-    REPORTING_TOP_K = 10  # En kötü kaç örnek detaylı kaydedilsin
+    REPORTING_TOP_K = 10  # Geriye dönük: REPORTING_WORST_K için fallback
+    REPORTING_WORST_K = 10  # En kötü kaç örnek detaylı kaydedilsin
+    REPORTING_BEST_K = 10  # En iyi kaç örnek detaylı kaydedilsin
+    REPORTING_BEST_REQUIRE_FOREGROUND = True  # True: best listesine fg_pixels>0 örnekleri al
     REPORTING_STATS_DIR_NAME = "stats"  # results/<run_name>/stats/epoch_XXX
 
     # --- R-Drop (default açık) ---

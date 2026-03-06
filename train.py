@@ -342,6 +342,12 @@ def _write_validation_summary(records: list[dict], out_path: Path):
     scores = np.array([r["iou"] for r in records], dtype=np.float32)
     if scores.size == 0:
         return
+    non_empty_scores = np.array([r["iou"] for r in records if r["fg_pixels"] > 0], dtype=np.float32)
+    empty_gt_count = int(sum(1 for r in records if r["fg_pixels"] == 0))
+    perfect_count = int(sum(1 for r in records if r["iou"] >= 0.999999))
+    zero_count = int(sum(1 for r in records if r["iou"] <= 1e-6))
+    perfect_empty_count = int(sum(1 for r in records if r["iou"] >= 0.999999 and r["fg_pixels"] == 0))
+    perfect_non_empty_count = int(sum(1 for r in records if r["iou"] >= 0.999999 and r["fg_pixels"] > 0))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f"samples={scores.size}",
@@ -350,7 +356,25 @@ def _write_validation_summary(records: list[dict], out_path: Path):
         f"min_iou={float(scores.min()):.6f}",
         f"max_iou={float(scores.max()):.6f}",
         f"std_iou={float(scores.std()):.6f}",
+        f"empty_gt_samples={empty_gt_count}",
+        f"non_empty_gt_samples={int(scores.size) - empty_gt_count}",
+        f"perfect_iou_samples={perfect_count}",
+        f"zero_iou_samples={zero_count}",
+        f"perfect_iou_with_empty_gt_samples={perfect_empty_count}",
+        f"perfect_iou_with_non_empty_gt_samples={perfect_non_empty_count}",
     ]
+    if non_empty_scores.size > 0:
+        lines.extend(
+            [
+                f"mean_iou_non_empty_gt={float(non_empty_scores.mean()):.6f}",
+                f"median_iou_non_empty_gt={float(np.median(non_empty_scores)):.6f}",
+                f"min_iou_non_empty_gt={float(non_empty_scores.min()):.6f}",
+                f"max_iou_non_empty_gt={float(non_empty_scores.max()):.6f}",
+                f"std_iou_non_empty_gt={float(non_empty_scores.std()):.6f}",
+            ]
+        )
+    else:
+        lines.append("mean_iou_non_empty_gt=nan")
     out_path.write_text("\n".join(lines) + "\n")
 
 
@@ -392,11 +416,41 @@ def _should_capture_worst_sample(
     return (candidate_iou, -candidate_diff_ratio) < (boundary["iou"], -boundary["diff_ratio"])
 
 
-def _save_poor_validation_samples(samples: list[dict], out_dir: Path):
+def _update_best_samples(best_samples: list[dict], candidate: dict, top_k: int) -> list[dict]:
+    if top_k <= 0:
+        return best_samples
+    best_samples.append(candidate)
+    best_samples.sort(key=lambda r: (-r["iou"], -r["fg_pixels"], r["diff_ratio"]))
+    if len(best_samples) > top_k:
+        del best_samples[top_k:]
+    return best_samples
+
+
+def _should_capture_best_sample(
+    best_samples: list[dict],
+    candidate_iou: float,
+    candidate_fg_pixels: float,
+    candidate_diff_ratio: float,
+    top_k: int,
+) -> bool:
+    if top_k <= 0:
+        return False
+    if len(best_samples) < top_k:
+        return True
+    boundary = best_samples[-1]
+    candidate_key = (-candidate_iou, -candidate_fg_pixels, candidate_diff_ratio)
+    boundary_key = (-boundary["iou"], -boundary["fg_pixels"], boundary["diff_ratio"])
+    return candidate_key < boundary_key
+
+
+def _save_ranked_validation_samples(samples: list[dict], out_dir: Path, rank_mode: str):
     if not samples:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
-    samples = sorted(samples, key=lambda r: (r["iou"], -r["diff_ratio"]))
+    if rank_mode == "best":
+        samples = sorted(samples, key=lambda r: (-r["iou"], -r["fg_pixels"], r["diff_ratio"]))
+    else:
+        samples = sorted(samples, key=lambda r: (r["iou"], -r["diff_ratio"]))
 
     for rank, rec in enumerate(samples, start=1):
         sample_idx = int(rec["sample_index"])
@@ -438,7 +492,7 @@ def _save_poor_validation_samples(samples: list[dict], out_dir: Path):
                 ax.imshow(arr, cmap=cmap, vmin=0, vmax=1)
             ax.set_title(title)
             ax.axis("off")
-        fig.suptitle(f"rank={rank} | iou={rec['iou']:.4f} | {image_name}")
+        fig.suptitle(f"{rank_mode}_rank={rank} | iou={rec['iou']:.4f} | {image_name}")
         fig.tight_layout()
         fig.savefig(sample_dir / "panel.png", dpi=150)
         plt.close(fig)
@@ -457,21 +511,39 @@ def _save_poor_validation_samples(samples: list[dict], out_dir: Path):
             f"diff_ratio={rec['diff_ratio']:.6f}",
             "legend_fp=extra(red)",
             "legend_fn=missing(cyan)",
+            f"rank_mode={rank_mode}",
         ]
         (sample_dir / "metrics.txt").write_text("\n".join(details) + "\n")
 
 
-def _save_validation_epoch_report(records: list[dict], worst_samples: list[dict], result_dir: Path, epoch_num: int, stats_dir_name: str):
+def _save_poor_validation_samples(samples: list[dict], out_dir: Path):
+    _save_ranked_validation_samples(samples=samples, out_dir=out_dir, rank_mode="worst")
+
+
+def _save_best_validation_samples(samples: list[dict], out_dir: Path):
+    _save_ranked_validation_samples(samples=samples, out_dir=out_dir, rank_mode="best")
+
+
+def _save_validation_epoch_report(
+    records: list[dict],
+    worst_samples: list[dict],
+    best_samples: list[dict],
+    result_dir: Path,
+    epoch_num: int,
+    stats_dir_name: str,
+):
     if not records:
         return
     epoch_dir = result_dir / stats_dir_name / f"epoch_{epoch_num:03d}"
     charts_dir = epoch_dir / "charts"
     poor_dir = epoch_dir / "poor_samples"
+    best_dir = epoch_dir / "best_samples"
     _write_validation_samples_csv(records, epoch_dir / "val_sample_metrics.csv")
     _write_validation_summary(records, epoch_dir / "summary.txt")
     _plot_validation_iou_hist(records, charts_dir / "iou_histogram.png")
     _plot_validation_iou_sorted(records, charts_dir / "iou_sorted.png")
     _save_poor_validation_samples(samples=worst_samples, out_dir=poor_dir)
+    _save_best_validation_samples(samples=best_samples, out_dir=best_dir)
 
 
 def train(
@@ -519,7 +591,12 @@ def train(
         getattr(Config, "METRIC_THRESHOLD", 0.5) if metric_threshold is None else float(metric_threshold)
     )
     reporting_enabled = bool(getattr(Config, "ENABLE_VALIDATION_REPORTING", False))
-    reporting_top_k = max(int(getattr(Config, "REPORTING_TOP_K", 10)), 0)
+    reporting_worst_k = max(
+        int(getattr(Config, "REPORTING_WORST_K", getattr(Config, "REPORTING_TOP_K", 10))),
+        0,
+    )
+    reporting_best_k = max(int(getattr(Config, "REPORTING_BEST_K", 10)), 0)
+    reporting_best_require_foreground = bool(getattr(Config, "REPORTING_BEST_REQUIRE_FOREGROUND", True))
     reporting_stats_dir = str(getattr(Config, "REPORTING_STATS_DIR_NAME", "stats"))
     rdrop_enabled = bool(getattr(Config, "ENABLE_R_DROP", True))
     rdrop_alpha = float(getattr(Config, "R_DROP_ALPHA", 0.3))
@@ -692,6 +769,7 @@ def train(
         val_tp, val_fp, val_tn, val_fn = 0.0, 0.0, 0.0, 0.0
         val_sample_records: list[dict] = []
         worst_samples: list[dict] = []
+        best_samples: list[dict] = []
         val_sample_index = 0
         with torch.no_grad():
             if use_tqdm:
@@ -746,23 +824,47 @@ def train(
                         }
                         val_sample_records.append(rec)
 
-                        if _should_capture_worst_sample(
+                        should_capture_worst = _should_capture_worst_sample(
                             worst_samples=worst_samples,
                             candidate_iou=iou,
                             candidate_diff_ratio=diff_ratio,
-                            top_k=reporting_top_k,
-                        ):
+                            top_k=reporting_worst_k,
+                        )
+                        should_capture_best = (not reporting_best_require_foreground or fg_pixels > 0) and _should_capture_best_sample(
+                            best_samples=best_samples,
+                            candidate_iou=iou,
+                            candidate_fg_pixels=fg_pixels,
+                            candidate_diff_ratio=diff_ratio,
+                            top_k=reporting_best_k,
+                        )
+
+                        if should_capture_worst or should_capture_best:
                             pred_mask = (preds[b, 0] > 0.5).to(torch.uint8).detach().cpu().numpy()
                             true_mask = (labels[b, 0] > 0.5).to(torch.uint8).detach().cpu().numpy()
+                            image_rgb = _tensor_image_to_uint8(images[b])
+
+                        if should_capture_worst:
                             _update_worst_samples(
                                 worst_samples=worst_samples,
                                 candidate={
                                     **rec,
-                                    "image_rgb": _tensor_image_to_uint8(images[b]),
+                                    "image_rgb": image_rgb,
                                     "true_mask": true_mask,
                                     "pred_mask": pred_mask,
                                 },
-                                top_k=reporting_top_k,
+                                top_k=reporting_worst_k,
+                            )
+
+                        if should_capture_best:
+                            _update_best_samples(
+                                best_samples=best_samples,
+                                candidate={
+                                    **rec,
+                                    "image_rgb": image_rgb,
+                                    "true_mask": true_mask,
+                                    "pred_mask": pred_mask,
+                                },
+                                top_k=reporting_best_k,
                             )
 
                         val_sample_index += 1
@@ -811,6 +913,7 @@ def train(
             _save_validation_epoch_report(
                 records=val_sample_records,
                 worst_samples=worst_samples,
+                best_samples=best_samples,
                 result_dir=result_dir,
                 epoch_num=epoch + 1,
                 stats_dir_name=reporting_stats_dir,
@@ -875,7 +978,10 @@ def train(
                 "r_drop_alpha": rdrop_alpha,
                 "r_drop_start_epoch": rdrop_start_epoch,
                 "enable_validation_reporting": reporting_enabled,
-                "reporting_top_k": reporting_top_k,
+                "reporting_top_k": reporting_worst_k,
+                "reporting_worst_k": reporting_worst_k,
+                "reporting_best_k": reporting_best_k,
+                "reporting_best_require_foreground": reporting_best_require_foreground,
                 "reporting_stats_dir_name": reporting_stats_dir,
             },
         }

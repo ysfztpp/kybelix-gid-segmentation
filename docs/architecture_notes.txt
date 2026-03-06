@@ -39,22 +39,25 @@ Data Source Modes (config.py)
 
 Validation Reporting (per-epoch diagnostics)
 - Toggle from config.py:
-  - `ENABLE_VALIDATION_REPORTING = False` (default, no extra reporting)
+  - `ENABLE_VALIDATION_REPORTING = False` (no extra reporting)
   - `ENABLE_VALIDATION_REPORTING = True` (creates detailed epoch reports)
 - Optional controls:
-  - `REPORTING_TOP_K` (worst validation samples to dump per epoch)
+  - `REPORTING_WORST_K` (worst validation samples to dump per epoch)
+  - `REPORTING_BEST_K` (best validation samples to dump per epoch)
+  - `REPORTING_BEST_REQUIRE_FOREGROUND` (if `True`, best samples require GT foreground)
+  - `REPORTING_TOP_K` (backward-compatible fallback for `REPORTING_WORST_K`)
   - `REPORTING_STATS_DIR_NAME` (default: `stats`)
 - Output path:
   - `results/<run_name>/<REPORTING_STATS_DIR_NAME>/epoch_XXX/`
 - Generated files:
   - `val_sample_metrics.csv` (per-sample IoU and confusion stats)
-  - `summary.txt` (distribution + outlier summary)
+  - `summary.txt` (all-sample + non-empty-GT IoU summary and counts)
   - `charts/iou_histogram.png`
-  - `charts/iou_boxplot.png`
-  - `charts/iou_vs_difference_ratio.png`
+  - `charts/iou_sorted.png`
   - `poor_samples/rank_.../`:
-    image, overlay, GT/pred masks, intersection, union, union-minus-intersection,
-    false-positive, false-negative, background, and a combined panel.
+    image, GT/pred masks, FP/FN masks, color error map, overlay, and panel.
+  - `best_samples/rank_.../`:
+    same artifacts as poor samples, ranked by best IoU.
 
 R-Drop Regularization
 - Enabled by default in config.py:
