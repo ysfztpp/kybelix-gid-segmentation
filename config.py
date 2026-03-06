@@ -120,7 +120,7 @@ class Config:
     # Seçenekler: "b0", "b4", "ghostnet", "segformer_b4"
     MODEL_NAME = "segformer_b4"
     NUM_CLASSES = 1
-    PRETRAINED = True
+    PRETRAINED = False
 
     # --- Boundary-aware yardımcı kayıp ---
     # Total Loss = Dice(seg) + CrossEntropy(seg) + lambda * BCE(edge)
@@ -129,12 +129,12 @@ class Config:
     EDGE_SOBEL_THRESHOLD = 0.1
 
     # --- Hiperparametreler (T4 için optimize edildi) ---
-    BATCH_SIZE = 8
+    BATCH_SIZE = 32
     GRAD_ACCUM_STEPS = 1  # Effective batch = BATCH_SIZE * GRAD_ACCUM_STEPS
     EPOCHS = 30
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = 1e-5
     IMAGE_SIZE = 512  # Giriş görüntü boyutu
-    NUM_WORKERS = 2
+    NUM_WORKERS = 10
     PIN_MEMORY = True
     PROGRESS_BAR = False  # Colab !python çıktısında satır spam'ini engeller
     LOG_INTERVAL = 100  # progress bar kapalıyken kaç adımda bir log basılsın
@@ -143,7 +143,7 @@ class Config:
     # --- Validation Raporlama ---
     # False: mevcut hızlı akış (rapor üretmez)
     # True: her epoch için detaylı validation raporu üretir
-    ENABLE_VALIDATION_REPORTING = False
+    ENABLE_VALIDATION_REPORTING = True
     REPORTING_TOP_K = 10  # En kötü kaç örnek detaylı kaydedilsin
     REPORTING_STATS_DIR_NAME = "stats"  # results/<run_name>/stats/epoch_XXX
 
