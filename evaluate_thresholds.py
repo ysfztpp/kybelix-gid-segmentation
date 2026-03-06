@@ -18,6 +18,20 @@ from src.utils.metrics import get_binary_metrics_from_confusion, get_confusion_c
 from src.utils.model_outputs import get_segmentation_logits
 
 
+def _load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict:
+    if checkpoint_path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
+        raise ValueError(
+            "Checkpoint must be a PyTorch file (.pth/.pt/.ckpt). "
+            f"Got: {checkpoint_path}"
+        )
+    try:
+        # PyTorch >=2.6 defaults to weights_only=True, which breaks full training checkpoints.
+        return torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        # PyTorch <2.6 does not support weights_only argument.
+        return torch.load(checkpoint_path, map_location=device)
+
+
 def _build_thresholds(min_threshold: float, max_threshold: float, step: float):
     if step <= 0:
         raise ValueError("Threshold step must be > 0.")
@@ -82,7 +96,7 @@ def main():
     thresholds = _build_thresholds(args.min_threshold, args.max_threshold, args.step)
     device = Config.DEVICE
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = _load_checkpoint(checkpoint_path, device)
     model_name = args.model_name or checkpoint.get("model_name") or Config.MODEL_NAME
 
     model = get_model(model_name, n_classes=Config.NUM_CLASSES, pretrained=False).to(device)

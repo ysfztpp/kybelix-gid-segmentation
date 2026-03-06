@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import csv
 import os
@@ -7,7 +9,9 @@ from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -22,6 +26,7 @@ from src.utils.metrics import (
     get_confusion_counts,
     get_iou_score,
 )
+from src.utils.model_outputs import get_segmentation_logits
 
 
 def _configure_torch():
@@ -80,6 +85,10 @@ def _load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict:
         )
 
     try:
+        # PyTorch >=2.6 defaults to weights_only=True, which breaks full training checkpoints.
+        return torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        # PyTorch <2.6 does not support weights_only argument.
         return torch.load(checkpoint_path, map_location=device)
     except Exception as exc:
         raise ValueError(
@@ -176,6 +185,334 @@ def _write_metrics_csv(history: list[dict], out_path: Path):
         writer.writerows(history)
 
 
+def _dataset_sample_name(dataset: GIDDataset, sample_index: int) -> str:
+    img_names = getattr(dataset, "img_names", None)
+    if isinstance(img_names, list) and 0 <= sample_index < len(img_names):
+        return str(img_names[sample_index])
+    return f"sample_{sample_index:06d}"
+
+
+def _safe_path_fragment(value: str) -> str:
+    cleaned = "".join(ch if (ch.isalnum() or ch in {"-", "_"}) else "_" for ch in value)
+    return cleaned.strip("_") or "sample"
+
+
+def _tensor_image_to_uint8(image_tensor: torch.Tensor) -> np.ndarray:
+    image = image_tensor.detach().cpu().float()
+    if image.ndim == 3 and image.shape[0] in {1, 3}:
+        image = image.permute(1, 2, 0)
+
+    image_np = image.numpy()
+    if image_np.ndim == 2:
+        image_np = np.repeat(image_np[..., None], 3, axis=-1)
+    if image_np.shape[-1] == 1:
+        image_np = np.repeat(image_np, 3, axis=-1)
+
+    # Reverse Albumentations Normalize() defaults if tensor looks normalized.
+    if image_np.min() < 0.0 or image_np.max() > 1.0:
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        if image_np.shape[-1] == 3:
+            image_np = image_np * std + mean
+
+    image_np = np.clip(image_np, 0.0, 1.0)
+    return (image_np * 255.0).astype(np.uint8)
+
+
+def _save_binary_mask(path: Path, mask: np.ndarray):
+    plt.imsave(path, (mask.astype(np.uint8) * 255), cmap="gray", vmin=0, vmax=255)
+
+
+def _compute_binary_batch_stats(seg_logits: torch.Tensor, labels: torch.Tensor, threshold: float):
+    if seg_logits.shape[-2:] != labels.shape[-2:]:
+        seg_logits = F.interpolate(seg_logits, size=labels.shape[-2:], mode="bilinear", align_corners=False)
+
+    probs = torch.sigmoid(seg_logits)
+    preds = (probs > threshold).float()
+    labels = labels.float()
+    if preds.shape != labels.shape:
+        labels = labels.view_as(preds)
+
+    tp = (preds * labels).sum(dim=(1, 2, 3))
+    fp = (preds * (1.0 - labels)).sum(dim=(1, 2, 3))
+    tn = ((1.0 - preds) * (1.0 - labels)).sum(dim=(1, 2, 3))
+    fn = ((1.0 - preds) * labels).sum(dim=(1, 2, 3))
+
+    intersection = tp
+    union = preds.sum(dim=(1, 2, 3)) + labels.sum(dim=(1, 2, 3)) - intersection
+    iou = (intersection + 1e-7) / (union + 1e-7)
+
+    return preds, labels, tp, fp, tn, fn, iou
+
+
+def _write_validation_samples_csv(records: list[dict], out_path: Path):
+    if not records:
+        return
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "sample_index",
+        "image_name",
+        "iou",
+        "diff_ratio",
+        "tp",
+        "fp",
+        "tn",
+        "fn",
+        "fg_pixels",
+        "pred_pixels",
+        "union_pixels",
+    ]
+    with out_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(records)
+
+
+def _plot_validation_iou_hist(records: list[dict], out_path: Path):
+    scores = np.array([r["iou"] for r in records], dtype=np.float32)
+    if scores.size == 0:
+        return
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    bins = max(10, min(40, int(np.sqrt(scores.size)) * 2))
+
+    plt.figure(figsize=(8, 5))
+    plt.hist(scores, bins=bins, color="#2E86AB", alpha=0.85, edgecolor="black")
+    plt.axvline(float(scores.mean()), color="orange", linestyle="--", linewidth=1.5, label="mean")
+    plt.axvline(float(np.median(scores)), color="green", linestyle="--", linewidth=1.5, label="median")
+    plt.title("Validation IoU Distribution")
+    plt.xlabel("IoU")
+    plt.ylabel("Sample Count")
+    plt.grid(alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
+def _plot_validation_iou_box(records: list[dict], out_path: Path):
+    scores = np.array([r["iou"] for r in records], dtype=np.float32)
+    if scores.size == 0:
+        return
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    plt.figure(figsize=(8, 4))
+    plt.boxplot(scores, vert=False, patch_artist=True, boxprops={"facecolor": "#8FD694"})
+    plt.title("Validation IoU Boxplot (Outlier Check)")
+    plt.xlabel("IoU")
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
+def _plot_validation_outlier_scatter(records: list[dict], out_path: Path):
+    scores = np.array([r["iou"] for r in records], dtype=np.float32)
+    diff_ratios = np.array([r["diff_ratio"] for r in records], dtype=np.float32)
+    if scores.size == 0:
+        return
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    plt.figure(figsize=(8, 5))
+    plt.scatter(scores, diff_ratios, alpha=0.7, s=16, color="#D1495B")
+    plt.title("Validation Outliers: IoU vs Difference Ratio")
+    plt.xlabel("IoU")
+    plt.ylabel("Difference Ratio (FP+FN)/Pixels")
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
+def _write_validation_summary(records: list[dict], out_path: Path):
+    scores = np.array([r["iou"] for r in records], dtype=np.float32)
+    if scores.size == 0:
+        return
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    q1 = float(np.percentile(scores, 25))
+    q3 = float(np.percentile(scores, 75))
+    iqr = q3 - q1
+    outlier_threshold = q1 - 1.5 * iqr
+    outlier_count = int((scores < outlier_threshold).sum())
+
+    lines = [
+        f"samples={scores.size}",
+        f"mean_iou={float(scores.mean()):.6f}",
+        f"std_iou={float(scores.std()):.6f}",
+        f"min_iou={float(scores.min()):.6f}",
+        f"p10_iou={float(np.percentile(scores, 10)):.6f}",
+        f"median_iou={float(np.percentile(scores, 50)):.6f}",
+        f"p90_iou={float(np.percentile(scores, 90)):.6f}",
+        f"max_iou={float(scores.max()):.6f}",
+        f"q1_iou={q1:.6f}",
+        f"q3_iou={q3:.6f}",
+        f"iqr={iqr:.6f}",
+        f"outlier_threshold={outlier_threshold:.6f}",
+        f"outlier_count={outlier_count}",
+    ]
+    out_path.write_text("\n".join(lines) + "\n")
+
+
+def _build_error_overlay(
+    image_rgb: np.ndarray,
+    intersection: np.ndarray,
+    false_positive: np.ndarray,
+    false_negative: np.ndarray,
+) -> np.ndarray:
+    overlay = image_rgb.astype(np.float32)
+    highlight = np.zeros_like(overlay)
+    highlight[intersection == 1] = np.array([0, 255, 0], dtype=np.float32)
+    highlight[false_positive == 1] = np.array([255, 0, 0], dtype=np.float32)
+    highlight[false_negative == 1] = np.array([0, 0, 255], dtype=np.float32)
+
+    active = (intersection == 1) | (false_positive == 1) | (false_negative == 1)
+    overlay[active] = 0.60 * overlay[active] + 0.40 * highlight[active]
+    return np.clip(overlay, 0, 255).astype(np.uint8)
+
+
+def _save_poor_validation_samples(
+    model: torch.nn.Module,
+    dataset: GIDDataset,
+    sample_records: list[dict],
+    metric_threshold: float,
+    out_dir: Path,
+    top_k: int,
+):
+    if not sample_records or top_k <= 0:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    worst = sorted(sample_records, key=lambda r: (r["iou"], -r["diff_ratio"]))[: min(top_k, len(sample_records))]
+    was_training = model.training
+    model.eval()
+
+    with torch.no_grad():
+        for rank, record in enumerate(worst, start=1):
+            sample_idx = int(record["sample_index"])
+            image_name = str(record["image_name"])
+            image_tensor, mask_tensor = dataset[sample_idx]
+
+            image_batch = image_tensor.unsqueeze(0).to(Config.DEVICE)
+            mask_batch = mask_tensor.unsqueeze(0).to(Config.DEVICE)
+
+            outputs = model(image_batch)
+            seg_logits = get_segmentation_logits(outputs)
+            if seg_logits.shape[-2:] != mask_batch.shape[-2:]:
+                seg_logits = F.interpolate(
+                    seg_logits,
+                    size=mask_batch.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+
+            pred_mask = (torch.sigmoid(seg_logits)[0, 0] > metric_threshold).to(torch.uint8).cpu().numpy()
+            true_mask = (mask_tensor[0] > 0.5).to(torch.uint8).cpu().numpy()
+
+            intersection = (pred_mask & true_mask).astype(np.uint8)
+            union = (pred_mask | true_mask).astype(np.uint8)
+            difference = (union & (1 - intersection)).astype(np.uint8)
+            false_positive = (pred_mask & (1 - true_mask)).astype(np.uint8)
+            false_negative = ((1 - pred_mask) & true_mask).astype(np.uint8)
+            background = (1 - union).astype(np.uint8)
+
+            image_rgb = _tensor_image_to_uint8(image_tensor)
+            overlay = _build_error_overlay(image_rgb, intersection, false_positive, false_negative)
+
+            sample_stem = Path(image_name).stem or f"sample_{sample_idx:06d}"
+            safe_stem = _safe_path_fragment(sample_stem)
+            sample_dir = out_dir / f"rank_{rank:03d}_{safe_stem}_{sample_idx:06d}"
+            sample_dir.mkdir(parents=True, exist_ok=True)
+
+            plt.imsave(sample_dir / "image.png", image_rgb)
+            plt.imsave(sample_dir / "overlay.png", overlay)
+            _save_binary_mask(sample_dir / "mask_true.png", true_mask)
+            _save_binary_mask(sample_dir / "mask_pred.png", pred_mask)
+            _save_binary_mask(sample_dir / "mask_intersection.png", intersection)
+            _save_binary_mask(sample_dir / "mask_union.png", union)
+            _save_binary_mask(sample_dir / "mask_difference_union_minus_intersection.png", difference)
+            _save_binary_mask(sample_dir / "mask_false_positive.png", false_positive)
+            _save_binary_mask(sample_dir / "mask_false_negative.png", false_negative)
+            _save_binary_mask(sample_dir / "mask_background.png", background)
+
+            panels = [
+                (image_rgb, "Image", None),
+                (overlay, "Overlay (TP/FP/FN)", None),
+                (true_mask, "GT Mask", "gray"),
+                (pred_mask, "Pred Mask", "gray"),
+                (background, "Background", "gray"),
+                (intersection, "Intersection", "gray"),
+                (union, "Union", "gray"),
+                (difference, "Union - Intersection", "gray"),
+                (false_positive, "False Positive", "gray"),
+                (false_negative, "False Negative", "gray"),
+            ]
+            fig, axes = plt.subplots(2, 5, figsize=(20, 8))
+            for ax, (arr, title, cmap) in zip(axes.flat, panels):
+                if cmap:
+                    ax.imshow(arr, cmap=cmap, vmin=0, vmax=1)
+                else:
+                    ax.imshow(arr)
+                ax.set_title(title)
+                ax.axis("off")
+            fig.suptitle(
+                f"rank={rank} | iou={record['iou']:.4f} | diff_ratio={record['diff_ratio']:.4f} | {image_name}",
+                fontsize=11,
+            )
+            fig.tight_layout()
+            fig.savefig(sample_dir / "panel.png", dpi=150)
+            plt.close(fig)
+
+            details = [
+                f"sample_index={sample_idx}",
+                f"image_name={image_name}",
+                f"iou={record['iou']:.6f}",
+                f"diff_ratio={record['diff_ratio']:.6f}",
+                f"tp={record['tp']}",
+                f"fp={record['fp']}",
+                f"tn={record['tn']}",
+                f"fn={record['fn']}",
+                f"fg_pixels={record['fg_pixels']}",
+                f"pred_pixels={record['pred_pixels']}",
+                f"union_pixels={record['union_pixels']}",
+            ]
+            (sample_dir / "metrics.txt").write_text("\n".join(details) + "\n")
+
+    if was_training:
+        model.train()
+
+
+def _save_validation_epoch_report(
+    model: torch.nn.Module,
+    dataset: GIDDataset,
+    records: list[dict],
+    result_dir: Path,
+    epoch_num: int,
+    metric_threshold: float,
+    stats_dir_name: str,
+    top_k: int,
+):
+    if not records:
+        return
+
+    epoch_dir = result_dir / stats_dir_name / f"epoch_{epoch_num:03d}"
+    charts_dir = epoch_dir / "charts"
+    poor_dir = epoch_dir / "poor_samples"
+
+    _write_validation_samples_csv(records, epoch_dir / "val_sample_metrics.csv")
+    _write_validation_summary(records, epoch_dir / "summary.txt")
+    _plot_validation_iou_hist(records, charts_dir / "iou_histogram.png")
+    _plot_validation_iou_box(records, charts_dir / "iou_boxplot.png")
+    _plot_validation_outlier_scatter(records, charts_dir / "iou_vs_difference_ratio.png")
+    _save_poor_validation_samples(
+        model=model,
+        dataset=dataset,
+        sample_records=records,
+        metric_threshold=metric_threshold,
+        out_dir=poor_dir,
+        top_k=top_k,
+    )
+
+
 def train(
     model_name=None,
     epochs=None,
@@ -220,6 +557,9 @@ def train(
     metric_threshold = (
         getattr(Config, "METRIC_THRESHOLD", 0.5) if metric_threshold is None else float(metric_threshold)
     )
+    reporting_enabled = bool(getattr(Config, "ENABLE_VALIDATION_REPORTING", False))
+    reporting_top_k = max(int(getattr(Config, "REPORTING_TOP_K", 10)), 0)
+    reporting_stats_dir = str(getattr(Config, "REPORTING_STATS_DIR_NAME", "stats"))
     use_tqdm = progress_bar and sys.stdout.isatty()
 
     train_loader = DataLoader(
@@ -374,6 +714,8 @@ def train(
         model.eval()
         val_loss, val_iou, val_steps = 0.0, 0.0, 0
         val_tp, val_fp, val_tn, val_fn = 0.0, 0.0, 0.0, 0.0
+        val_sample_records = [] if reporting_enabled else None
+        seen_val_samples = 0
         with torch.no_grad():
             if use_tqdm:
                 vloop = tqdm(val_loader, desc=f"Epoch [{epoch+1}/{epochs}] (val)")
@@ -384,13 +726,52 @@ def train(
                 with torch.amp.autocast("cuda", enabled=Config.DEVICE.type == "cuda"):
                     outputs = model(images)
                     loss = criterion(outputs, masks)
+
+                seg_logits = get_segmentation_logits(outputs)
+                _, _, tp_batch, fp_batch, tn_batch, fn_batch, iou_batch = _compute_binary_batch_stats(
+                    seg_logits=seg_logits,
+                    labels=masks,
+                    threshold=metric_threshold,
+                )
+
                 val_loss += loss.item()
-                val_iou += get_iou_score(outputs, masks, threshold=metric_threshold)
-                tp, fp, tn, fn = get_confusion_counts(outputs, masks, threshold=metric_threshold)
-                val_tp += tp
-                val_fp += fp
-                val_tn += tn
-                val_fn += fn
+                val_iou += iou_batch.mean().item()
+                val_tp += tp_batch.sum().item()
+                val_fp += fp_batch.sum().item()
+                val_tn += tn_batch.sum().item()
+                val_fn += fn_batch.sum().item()
+
+                if reporting_enabled and val_sample_records is not None:
+                    batch_size_curr = int(iou_batch.shape[0])
+                    for batch_idx in range(batch_size_curr):
+                        sample_index = seen_val_samples + batch_idx
+                        tp_val = float(tp_batch[batch_idx].item())
+                        fp_val = float(fp_batch[batch_idx].item())
+                        tn_val = float(tn_batch[batch_idx].item())
+                        fn_val = float(fn_batch[batch_idx].item())
+                        total_pixels = tp_val + fp_val + tn_val + fn_val
+                        diff_ratio = (fp_val + fn_val) / max(total_pixels, 1e-7)
+                        fg_pixels = tp_val + fn_val
+                        pred_pixels = tp_val + fp_val
+                        union_pixels = tp_val + fp_val + fn_val
+
+                        val_sample_records.append(
+                            {
+                                "sample_index": sample_index,
+                                "image_name": _dataset_sample_name(val_ds, sample_index),
+                                "iou": float(iou_batch[batch_idx].item()),
+                                "diff_ratio": float(diff_ratio),
+                                "tp": tp_val,
+                                "fp": fp_val,
+                                "tn": tn_val,
+                                "fn": fn_val,
+                                "fg_pixels": fg_pixels,
+                                "pred_pixels": pred_pixels,
+                                "union_pixels": union_pixels,
+                            }
+                        )
+                    seen_val_samples += batch_size_curr
+
                 val_steps += 1
                 is_last_val_batch = (step == len(val_loader)) or (max_val_batches and step >= max_val_batches)
                 if use_tqdm:
@@ -431,6 +812,17 @@ def train(
 
         _write_metrics_csv(history, result_dir / "metrics.csv")
         _plot_metrics(history, result_dir / "metrics.png")
+        if reporting_enabled and val_sample_records:
+            _save_validation_epoch_report(
+                model=model,
+                dataset=val_ds,
+                records=val_sample_records,
+                result_dir=result_dir,
+                epoch_num=epoch + 1,
+                metric_threshold=metric_threshold,
+                stats_dir_name=reporting_stats_dir,
+                top_k=reporting_top_k,
+            )
 
         is_best = epoch_metrics["val_iou"] >= best_val_iou
         if is_best:
@@ -484,6 +876,9 @@ def train(
                 "edge_loss_weight": Config.EDGE_LOSS_WEIGHT,
                 "edge_target_method": Config.EDGE_TARGET_METHOD,
                 "edge_sobel_threshold": Config.EDGE_SOBEL_THRESHOLD,
+                "enable_validation_reporting": reporting_enabled,
+                "reporting_top_k": reporting_top_k,
+                "reporting_stats_dir_name": reporting_stats_dir,
             },
         }
 

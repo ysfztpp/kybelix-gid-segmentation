@@ -26,6 +26,36 @@ Dataset Structure
 - Filenames must match by base name (extension ignored).
 - The loader does NOT recurse into subfolders.
 
+Data Source Modes (config.py)
+- `DATA_SOURCE_MODE = "drive_stream"` (default):
+  Reads directly from Drive paths (old behavior).
+- `DATA_SOURCE_MODE = "zip_local_cache"`:
+  If in Colab and `/content/drive/MyDrive/<SHORTCUT_NAME>.zip` exists, it copies
+  the zip to `/content`, extracts it once, and uses local disk for training.
+- Optional env overrides:
+  - `KYBELIX_DATA_SOURCE_MODE` (same values as above)
+  - `KYBELIX_SHORTCUT_NAME` (default: `phase1data`)
+  - `KYBELIX_DATA_ROOT` (hard override for dataset root)
+
+Validation Reporting (per-epoch diagnostics)
+- Toggle from config.py:
+  - `ENABLE_VALIDATION_REPORTING = False` (default, no extra reporting)
+  - `ENABLE_VALIDATION_REPORTING = True` (creates detailed epoch reports)
+- Optional controls:
+  - `REPORTING_TOP_K` (worst validation samples to dump per epoch)
+  - `REPORTING_STATS_DIR_NAME` (default: `stats`)
+- Output path:
+  - `results/<run_name>/<REPORTING_STATS_DIR_NAME>/epoch_XXX/`
+- Generated files:
+  - `val_sample_metrics.csv` (per-sample IoU and confusion stats)
+  - `summary.txt` (distribution + outlier summary)
+  - `charts/iou_histogram.png`
+  - `charts/iou_boxplot.png`
+  - `charts/iou_vs_difference_ratio.png`
+  - `poor_samples/rank_.../`:
+    image, overlay, GT/pred masks, intersection, union, union-minus-intersection,
+    false-positive, false-negative, background, and a combined panel.
+
 How To Train
 1) Install:
    pip install -r requirements.txt
