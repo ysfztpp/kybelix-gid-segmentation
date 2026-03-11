@@ -170,6 +170,8 @@ class DiceCrossEntropyBoundaryLoss(nn.Module):
         enable_lovasz=False,
         lovasz_weight=0.3,
         lovasz_per_image=True,
+        pos_weight=None,
+        class_weight=None,
     ):
         super().__init__()
         self.lambda_edge = lambda_edge
@@ -180,8 +182,8 @@ class DiceCrossEntropyBoundaryLoss(nn.Module):
         self.lovasz_per_image = lovasz_per_image
 
         self.dice_loss = DiceLoss()
-        self.bce_seg = nn.BCEWithLogitsLoss()
-        self.ce_seg = nn.CrossEntropyLoss()
+        self.bce_seg = nn.BCEWithLogitsLoss(pos_weight=pos_weight) if pos_weight is not None else nn.BCEWithLogitsLoss()
+        self.ce_seg = nn.CrossEntropyLoss(weight=class_weight) if class_weight is not None else nn.CrossEntropyLoss()
         self.bce_edge = nn.BCEWithLogitsLoss()
 
     def _cross_entropy_seg(self, seg_logits, targets):

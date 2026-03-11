@@ -10,6 +10,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import cv2
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -95,6 +96,61 @@ def _load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict:
             "Failed to load checkpoint. Ensure the path points to a valid PyTorch "
             "checkpoint file (not an image, zip, or text file)."
         ) from exc
+
+
+def _compute_pos_weight_from_masks(dataset: GIDDataset, sample_limit: int | None = None) -> float | None:
+    if not hasattr(dataset, "msk_names") or not hasattr(dataset, "masks_dir"):
+        raise ValueError("Dataset does not expose mask paths needed for pos_weight computation.")
+
+    mask_names = list(dataset.msk_names)
+    if sample_limit:
+        mask_names = mask_names[: int(sample_limit)]
+    if not mask_names:
+        return None
+
+    target_color = np.array(getattr(dataset, "target_color", [0, 255, 0]))
+    pos_pixels = 0
+    total_pixels = 0
+
+    for mask_name in mask_names:
+        mask_path = os.path.join(dataset.masks_dir, mask_name)
+        msk_bytes = np.fromfile(mask_path, np.uint8)
+        mask_raw = cv2.imdecode(msk_bytes, cv2.IMREAD_COLOR)
+        if mask_raw is None:
+            raise ValueError(f"Failed to read mask image: {mask_path}")
+        mask_raw = cv2.cvtColor(mask_raw, cv2.COLOR_BGR2RGB)
+        mask = np.all(mask_raw == target_color, axis=-1)
+        pos_pixels += int(mask.sum())
+        total_pixels += int(mask.size)
+
+    if total_pixels <= 0:
+        return None
+    if pos_pixels <= 0:
+        return 1.0
+
+    neg_pixels = total_pixels - pos_pixels
+    return float(neg_pixels / max(pos_pixels, 1))
+
+
+def _resolve_pos_weight(train_ds: GIDDataset) -> float | None:
+    if not bool(getattr(Config, "USE_CLASS_WEIGHTED_LOSS", False)):
+        return None
+
+    configured = getattr(Config, "POS_WEIGHT", None)
+    if configured is not None:
+        return float(configured)
+
+    sample_limit = getattr(Config, "POS_WEIGHT_SAMPLE_LIMIT", None)
+    pos_weight = _compute_pos_weight_from_masks(train_ds, sample_limit=sample_limit)
+    if pos_weight is None:
+        return None
+
+    cap = getattr(Config, "POS_WEIGHT_CAP", None)
+    if cap is not None:
+        pos_weight = min(pos_weight, float(cap))
+    if pos_weight < 1.0:
+        pos_weight = 1.0
+    return pos_weight
 
 
 def _is_max_monitor(metric_name: str) -> bool:
@@ -640,6 +696,13 @@ def train(
 
     model_name = model_name or Config.MODEL_NAME
     model = get_model(model_name, n_classes=Config.NUM_CLASSES, pretrained=pretrained).to(Config.DEVICE)
+    pos_weight_value = _resolve_pos_weight(train_ds)
+    pos_weight_tensor = None
+    if pos_weight_value is not None:
+        pos_weight_tensor = torch.tensor([pos_weight_value], device=Config.DEVICE, dtype=torch.float32)
+        print(f"Class-weighted loss enabled: pos_weight={pos_weight_value:.4f}")
+    elif bool(getattr(Config, "USE_CLASS_WEIGHTED_LOSS", False)):
+        print("Class-weighted loss enabled but pos_weight could not be computed; using unweighted loss.")
     criterion = DiceCrossEntropyBoundaryLoss(
         lambda_edge=Config.EDGE_LOSS_WEIGHT,
         edge_method=Config.EDGE_TARGET_METHOD,
@@ -647,6 +710,7 @@ def train(
         enable_lovasz=bool(getattr(Config, "ENABLE_LOVASZ", True)),
         lovasz_weight=float(getattr(Config, "LOVASZ_WEIGHT", 0.3)),
         lovasz_per_image=bool(getattr(Config, "LOVASZ_PER_IMAGE", True)),
+        pos_weight=pos_weight_tensor,
     )
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = None

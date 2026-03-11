@@ -162,6 +162,13 @@ class Config:
     LOVASZ_WEIGHT = 0.3
     LOVASZ_PER_IMAGE = True
 
+    # --- Class imbalance ---
+    # Binary için BCE pos_weight (neg/pos oranı). USE_CLASS_WEIGHTED_LOSS=True olursa aktif.
+    USE_CLASS_WEIGHTED_LOSS = False
+    POS_WEIGHT = None  # Float değer verirsen elle kullanılır; None ise otomatik hesaplanır.
+    POS_WEIGHT_CAP = 20.0  # Aşırı büyük ağırlıkları sınırlar.
+    POS_WEIGHT_SAMPLE_LIMIT = None  # None: tüm train maskeleri; sayı: en fazla bu kadar örnek.
+
     # --- Veri Seti Ayarları ---
     TARGET_COLOR = [0, 255, 0]  # GID Dataset yeşil alanlar
     USE_AUGMENTATION = True
