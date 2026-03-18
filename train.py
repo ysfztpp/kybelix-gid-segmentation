@@ -14,7 +14,7 @@ import cv2
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from config import Config
@@ -132,8 +132,8 @@ def _compute_pos_weight_from_masks(dataset: GIDDataset, sample_limit: int | None
     return float(neg_pixels / max(pos_pixels, 1))
 
 
-def _resolve_pos_weight(train_ds: GIDDataset) -> float | None:
-    if not bool(getattr(Config, "USE_CLASS_WEIGHTED_LOSS", False)):
+def _resolve_pos_weight(train_ds: GIDDataset, enabled: bool = True) -> float | None:
+    if not enabled:
         return None
 
     configured = getattr(Config, "POS_WEIGHT", None)
@@ -151,6 +151,66 @@ def _resolve_pos_weight(train_ds: GIDDataset) -> float | None:
     if pos_weight < 1.0:
         pos_weight = 1.0
     return pos_weight
+
+
+def _compute_sample_weights_from_masks(
+    dataset: GIDDataset,
+    strategy: str = "presence",
+    pos_weight: float = 3.0,
+    neg_weight: float = 1.0,
+    ratio_power: float = 1.0,
+    max_weight: float | None = None,
+    min_pos_pixels: int = 1,
+) -> tuple[list[float], dict]:
+    if not hasattr(dataset, "msk_names") or not hasattr(dataset, "masks_dir"):
+        raise ValueError("Dataset does not expose mask paths needed for oversampling.")
+
+    mask_names = list(dataset.msk_names)
+    if not mask_names:
+        return [], {}
+
+    target_color = np.array(getattr(dataset, "target_color", [0, 255, 0]))
+    min_pos_pixels = max(int(min_pos_pixels), 1)
+    pos_samples = 0
+    neg_samples = 0
+    weights: list[float] = []
+
+    for mask_name in mask_names:
+        mask_path = os.path.join(dataset.masks_dir, mask_name)
+        msk_bytes = np.fromfile(mask_path, np.uint8)
+        mask_raw = cv2.imdecode(msk_bytes, cv2.IMREAD_COLOR)
+        if mask_raw is None:
+            raise ValueError(f"Failed to read mask image: {mask_path}")
+        mask_raw = cv2.cvtColor(mask_raw, cv2.COLOR_BGR2RGB)
+        mask = np.all(mask_raw == target_color, axis=-1)
+        pos_pixels = int(mask.sum())
+        total_pixels = int(mask.size)
+
+        if pos_pixels >= min_pos_pixels:
+            pos_samples += 1
+            if strategy == "presence":
+                weight = float(pos_weight)
+            elif strategy == "ratio":
+                ratio = pos_pixels / max(total_pixels, 1)
+                weight = float(pos_weight) * (ratio ** (-float(ratio_power)))
+            else:
+                raise ValueError("Unknown oversampling strategy. Use 'presence' or 'ratio'.")
+        else:
+            neg_samples += 1
+            weight = float(neg_weight)
+
+        if max_weight is not None:
+            weight = min(weight, float(max_weight))
+        weights.append(float(weight))
+
+    stats = {
+        "pos_samples": pos_samples,
+        "neg_samples": neg_samples,
+        "min_weight": float(min(weights)),
+        "max_weight": float(max(weights)),
+        "mean_weight": float(np.mean(weights)),
+    }
+    return weights, stats
 
 
 def _is_max_monitor(metric_name: str) -> bool:
@@ -659,10 +719,41 @@ def train(
     rdrop_start_epoch = max(int(getattr(Config, "R_DROP_START_EPOCH", 1)), 1)
     use_tqdm = progress_bar and sys.stdout.isatty()
 
+    sampler = None
+    if bool(getattr(Config, "USE_OVERSAMPLING", False)):
+        strategy = str(getattr(Config, "OVERSAMPLE_STRATEGY", "presence")).strip().lower()
+        pos_weight = float(getattr(Config, "OVERSAMPLE_POS_WEIGHT", 3.0))
+        neg_weight = float(getattr(Config, "OVERSAMPLE_NEG_WEIGHT", 1.0))
+        ratio_power = float(getattr(Config, "OVERSAMPLE_RATIO_POWER", 1.0))
+        max_weight = getattr(Config, "OVERSAMPLE_MAX_WEIGHT", None)
+        min_pos_pixels = int(getattr(Config, "OVERSAMPLE_MIN_POS_PIXELS", 1))
+        weights, stats = _compute_sample_weights_from_masks(
+            train_ds,
+            strategy=strategy,
+            pos_weight=pos_weight,
+            neg_weight=neg_weight,
+            ratio_power=ratio_power,
+            max_weight=max_weight,
+            min_pos_pixels=min_pos_pixels,
+        )
+        if weights:
+            weight_tensor = torch.tensor(weights, dtype=torch.double)
+            sampler = WeightedRandomSampler(weights=weight_tensor, num_samples=len(weights), replacement=True)
+            print(
+                "Oversampling enabled: "
+                f"strategy={strategy}, pos_samples={stats['pos_samples']}, "
+                f"neg_samples={stats['neg_samples']}, "
+                f"weights[min/mean/max]={stats['min_weight']:.3f}/"
+                f"{stats['mean_weight']:.3f}/{stats['max_weight']:.3f}"
+            )
+        else:
+            print("Oversampling enabled but dataset is empty; falling back to shuffle.")
+
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=Config.PIN_MEMORY,
     )
@@ -694,15 +785,43 @@ def train(
                 f"Checkpoint model '{ckpt_model_name}' does not match requested model '{model_name}'."
             )
 
+    use_focal = bool(getattr(Config, "USE_FOCAL_LOSS", False))
+    focal_gamma = float(getattr(Config, "FOCAL_GAMMA", 2.0))
+    focal_alpha = getattr(Config, "FOCAL_ALPHA", None)
+    pos_weight_enabled = bool(getattr(Config, "USE_CLASS_WEIGHTED_LOSS", False)) or (
+        use_focal and focal_alpha is None
+    )
+
     model_name = model_name or Config.MODEL_NAME
     model = get_model(model_name, n_classes=Config.NUM_CLASSES, pretrained=pretrained).to(Config.DEVICE)
-    pos_weight_value = _resolve_pos_weight(train_ds)
+    pos_weight_value = _resolve_pos_weight(train_ds, enabled=pos_weight_enabled)
+
+    if use_focal:
+        if focal_alpha is None and pos_weight_value is not None:
+            focal_alpha = pos_weight_value / (1.0 + pos_weight_value)
+            print(
+                f"Focal loss enabled: gamma={focal_gamma:.2f}, "
+                f"alpha derived from pos_weight={focal_alpha:.4f}"
+            )
+        else:
+            print(f"Focal loss enabled: gamma={focal_gamma:.2f}, alpha={focal_alpha}")
+
     pos_weight_tensor = None
-    if pos_weight_value is not None:
-        pos_weight_tensor = torch.tensor([pos_weight_value], device=Config.DEVICE, dtype=torch.float32)
-        print(f"Class-weighted loss enabled: pos_weight={pos_weight_value:.4f}")
-    elif bool(getattr(Config, "USE_CLASS_WEIGHTED_LOSS", False)):
-        print("Class-weighted loss enabled but pos_weight could not be computed; using unweighted loss.")
+    if not use_focal:
+        if pos_weight_value is not None:
+            pos_weight_tensor = torch.tensor([pos_weight_value], device=Config.DEVICE, dtype=torch.float32)
+            print(f"Class-weighted loss enabled: pos_weight={pos_weight_value:.4f}")
+        elif bool(getattr(Config, "USE_CLASS_WEIGHTED_LOSS", False)):
+            print("Class-weighted loss enabled but pos_weight could not be computed; using unweighted loss.")
+
+    class_weight_tensor = None
+    class_weights = getattr(Config, "CLASS_WEIGHTS", None)
+    if class_weights is not None:
+        if len(class_weights) != Config.NUM_CLASSES:
+            raise ValueError(
+                f"CLASS_WEIGHTS length {len(class_weights)} does not match NUM_CLASSES={Config.NUM_CLASSES}."
+            )
+        class_weight_tensor = torch.tensor(class_weights, device=Config.DEVICE, dtype=torch.float32)
     criterion = DiceCrossEntropyBoundaryLoss(
         lambda_edge=Config.EDGE_LOSS_WEIGHT,
         edge_method=Config.EDGE_TARGET_METHOD,
@@ -711,6 +830,11 @@ def train(
         lovasz_weight=float(getattr(Config, "LOVASZ_WEIGHT", 0.3)),
         lovasz_per_image=bool(getattr(Config, "LOVASZ_PER_IMAGE", True)),
         pos_weight=pos_weight_tensor,
+        class_weight=class_weight_tensor,
+        use_focal=use_focal,
+        focal_gamma=focal_gamma,
+        focal_alpha=focal_alpha,
+        focal_reduction=str(getattr(Config, "FOCAL_REDUCTION", "mean")),
     )
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = None

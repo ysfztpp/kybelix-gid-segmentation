@@ -152,7 +152,7 @@ class Config:
 
     # --- R-Drop (default açık) ---
     # İki forward ile tutarlılık regularization: loss = sup_avg + alpha * KL
-    ENABLE_R_DROP = True
+    ENABLE_R_DROP = False
     R_DROP_ALPHA = 0.3
     R_DROP_START_EPOCH = 1
 
@@ -168,6 +168,20 @@ class Config:
     POS_WEIGHT = None  # Float değer verirsen elle kullanılır; None ise otomatik hesaplanır.
     POS_WEIGHT_CAP = 20.0  # Aşırı büyük ağırlıkları sınırlar.
     POS_WEIGHT_SAMPLE_LIMIT = None  # None: tüm train maskeleri; sayı: en fazla bu kadar örnek.
+    CLASS_WEIGHTS = None  # Multi-class için opsiyonel CE ağırlıkları (ör: [1.0, 2.0, 3.0])
+    # Focal Loss (opsiyonel)
+    USE_FOCAL_LOSS = True
+    FOCAL_GAMMA = 2.0
+    FOCAL_ALPHA = None  # Binary: float (pos) veya [neg, pos]; Multi-class: [c0, c1, ...]
+    FOCAL_REDUCTION = "mean"
+    # Oversampling (opsiyonel)
+    USE_OVERSAMPLING = True
+    OVERSAMPLE_STRATEGY = "ratio"  # "presence" veya "ratio"
+    OVERSAMPLE_POS_WEIGHT = 3.0
+    OVERSAMPLE_NEG_WEIGHT = 1.0
+    OVERSAMPLE_RATIO_POWER = 1.0
+    OVERSAMPLE_MAX_WEIGHT = 20.0
+    OVERSAMPLE_MIN_POS_PIXELS = 1
 
     # --- Veri Seti Ayarları ---
     TARGET_COLOR = [0, 255, 0]  # GID Dataset yeşil alanlar

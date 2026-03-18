@@ -98,6 +98,102 @@ class FocalTverskyLoss(nn.Module):
         return (1 - tversky) ** self.gamma
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for binary or multi-class segmentation.
+    alpha:
+      - binary: float (pos weight) or [alpha_neg, alpha_pos]
+      - multi-class: list/tuple/tensor of per-class weights
+    """
+
+    def __init__(self, gamma=2.0, alpha=None, reduction="mean"):
+        super().__init__()
+        self.gamma = float(gamma)
+        self.alpha = alpha
+        self.reduction = reduction
+
+    def _resolve_alpha(self, device, dtype):
+        if self.alpha is None:
+            return None
+        if torch.is_tensor(self.alpha):
+            return self.alpha.to(device=device, dtype=dtype)
+        if isinstance(self.alpha, (list, tuple)):
+            return torch.tensor(self.alpha, device=device, dtype=dtype)
+        return torch.tensor(float(self.alpha), device=device, dtype=dtype)
+
+    def _reduce(self, loss):
+        if self.reduction == "none":
+            return loss
+        if self.reduction == "sum":
+            return loss.sum()
+        if self.reduction == "mean":
+            return loss.mean()
+        raise ValueError(f"Unsupported reduction: {self.reduction}")
+
+    def _binary_focal(self, logits, targets):
+        if targets.dim() == 3:
+            targets = targets.unsqueeze(1)
+        targets = targets.float()
+        if logits.shape != targets.shape:
+            targets = targets.view_as(logits)
+
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        pt = torch.exp(-bce)
+        focal_term = (1.0 - pt).pow(self.gamma)
+
+        alpha = self._resolve_alpha(logits.device, logits.dtype)
+        if alpha is None:
+            alpha_t = 1.0
+        else:
+            if alpha.numel() == 1:
+                alpha_pos = alpha
+                alpha_neg = 1.0 - alpha
+            elif alpha.numel() == 2:
+                alpha_neg = alpha[0]
+                alpha_pos = alpha[1]
+            else:
+                raise ValueError("Binary focal alpha must be scalar or length 2.")
+            alpha_t = alpha_pos * targets + alpha_neg * (1.0 - targets)
+
+        loss = alpha_t * focal_term * bce
+        return self._reduce(loss)
+
+    def _multiclass_focal(self, logits, targets):
+        if targets.dim() == 4:
+            if targets.shape[1] == 1:
+                targets = targets.squeeze(1)
+            else:
+                targets = targets.argmax(dim=1)
+        targets = targets.long()
+
+        log_probs = F.log_softmax(logits, dim=1)
+        probs = log_probs.exp()
+        logpt = log_probs.gather(1, targets.unsqueeze(1))
+        pt = probs.gather(1, targets.unsqueeze(1))
+        focal_term = (1.0 - pt).pow(self.gamma)
+
+        alpha = self._resolve_alpha(logits.device, logits.dtype)
+        if alpha is None:
+            alpha_t = 1.0
+        else:
+            if alpha.numel() == 1:
+                alpha_t = alpha
+            else:
+                if alpha.numel() != logits.shape[1]:
+                    raise ValueError(
+                        f"Multi-class focal alpha must have {logits.shape[1]} values, got {alpha.numel()}."
+                    )
+                alpha_t = alpha[targets].unsqueeze(1)
+
+        loss = -alpha_t * focal_term * logpt
+        return self._reduce(loss.squeeze(1))
+
+    def forward(self, logits, targets):
+        if logits.shape[1] == 1:
+            return self._binary_focal(logits, targets)
+        return self._multiclass_focal(logits, targets)
+
+
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-6):
         super().__init__()
@@ -159,7 +255,8 @@ def build_edge_targets(masks, method="sobel", sobel_threshold=0.1):
 
 class DiceCrossEntropyBoundaryLoss(nn.Module):
     """
-    Total Loss = Dice(seg) + CrossEntropy(seg) + lambda * BCE(edge)
+    Total Loss = Dice(seg) + SegLoss(seg) + lambda * BCE(edge)
+    SegLoss = CrossEntropy/BCE or Focal Loss (optional)
     """
 
     def __init__(
@@ -172,6 +269,10 @@ class DiceCrossEntropyBoundaryLoss(nn.Module):
         lovasz_per_image=True,
         pos_weight=None,
         class_weight=None,
+        use_focal=False,
+        focal_gamma=2.0,
+        focal_alpha=None,
+        focal_reduction="mean",
     ):
         super().__init__()
         self.lambda_edge = lambda_edge
@@ -181,12 +282,21 @@ class DiceCrossEntropyBoundaryLoss(nn.Module):
         self.lovasz_weight = lovasz_weight
         self.lovasz_per_image = lovasz_per_image
 
+        self.use_focal = bool(use_focal)
         self.dice_loss = DiceLoss()
         self.bce_seg = nn.BCEWithLogitsLoss(pos_weight=pos_weight) if pos_weight is not None else nn.BCEWithLogitsLoss()
         self.ce_seg = nn.CrossEntropyLoss(weight=class_weight) if class_weight is not None else nn.CrossEntropyLoss()
+        self.focal_loss = (
+            FocalLoss(gamma=focal_gamma, alpha=focal_alpha, reduction=focal_reduction)
+            if self.use_focal
+            else None
+        )
         self.bce_edge = nn.BCEWithLogitsLoss()
 
     def _cross_entropy_seg(self, seg_logits, targets):
+        if self.use_focal:
+            return self.focal_loss(seg_logits, targets)
+
         if seg_logits.shape[1] == 1:
             if targets.dim() == 3:
                 targets = targets.unsqueeze(1)
